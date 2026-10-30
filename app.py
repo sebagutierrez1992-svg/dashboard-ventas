@@ -9,15 +9,15 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📊 Automatizador y Dashboard de Ventas y Despachos")
+st.title("📊 Panel Interactivo de Ventas y Despachos")
 st.markdown(
-    "Sube tu archivo Excel (`.xlsx`, `.xlsm`) o CSV para procesarlo,"
-    " limpiarlo y exportarlo automáticamente."
+    "Sube tu archivo Excel (`.xlsm`, `.xlsx`) para visualizar métricas,"
+    " gráficos y limpiar los datos automáticamente."
 )
 
 # 1. Componente para cargar el archivo
 uploaded_file = st.file_uploader(
-    "Arrastra o selecciona tu archivo de datos", type=["xlsx", "xlsm", "csv"]
+    "Selecciona o arrastra tu archivo de datos", type=["xlsx", "xlsm", "csv"]
 )
 
 if uploaded_file is not None:
@@ -28,44 +28,19 @@ if uploaded_file is not None:
     else:
       xl = pd.ExcelFile(uploaded_file)
       selected_sheet = st.selectbox(
-          "Selecciona la hoja a procesar:", xl.sheet_names
+          "Selecciona la hoja de trabajo:", xl.sheet_names
       )
       df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
 
     st.success(
-        f"¡Archivo cargado correctamente! Se encontraron {len(df)} filas y"
+        f"¡Archivo cargado con éxito! Se procesaron {len(df):,} registros y"
         f" {len(df.columns)} columnas."
     )
 
-    # Vista previa de los datos
-    with st.expander("🔍 Ver vista previa de los datos originales"):
-      st.dataframe(df.head(10))
-
-    # 2. Opciones de Limpieza y Transformación
-    st.subheader("⚙️ Opciones de Procesamiento")
-    col1, col2 = st.columns(2)
-
-    with col1:
-      remover_duplicados = st.checkbox(
-          "Eliminar filas duplicadas", value=True
-      )
-    with col2:
-      llenar_nulos = st.checkbox(
-          "Rellenar campos vacíos (0 en números / N/A en texto)", value=False
-      )
-
+    # Limpieza básica automática opcional
     df_procesado = df.copy()
 
-    if remover_duplicados:
-      df_procesado = df_procesado.drop_duplicates()
-
-    if llenar_nulos:
-      for col in df_procesado.select_dtypes(include=["number"]).columns:
-        df_procesado[col] = df_procesado[col].fillna(0)
-      for col in df_procesado.select_dtypes(include=["object"]).columns:
-        df_procesado[col] = df_procesado[col].fillna("N/A")
-
-    # 3. Métricas y Resumen Rápido
+    # 2. Resumen Ejecutivo (Métricas Principales)
     st.subheader("📈 Resumen Ejecutivo")
     numeric_cols = df_procesado.select_dtypes(
         include=["number"]
@@ -73,38 +48,60 @@ if uploaded_file is not None:
 
     if numeric_cols:
       col_metrica = st.selectbox(
-          "Selecciona columna numérica para calcular totales:", numeric_cols
+          "Métrica principal a analizar (Columna numérica):", numeric_cols
       )
       total_suma = df_procesado[col_metrica].sum()
       promedio = df_procesado[col_metrica].mean()
 
       m1, m2, m3 = st.columns(3)
-      m1.metric("Total Registros", f"{len(df_procesado):,}")
+      m1.metric("Total de Registros", f"{len(df_procesado):,}")
       m2.metric(f"Suma Total de {col_metrica}", f"{total_suma:,.2f}")
       m3.metric(f"Promedio de {col_metrica}", f"{promedio:,.2f}")
+
+      # 3. Visualización Gráfica Interactiva
+      st.subheader("📊 Análisis Gráfico")
+      categorical_cols = df_procesado.select_dtypes(
+          include=["object", "category"]
+      ).columns.tolist()
+
+      if categorical_cols:
+        col_cat = st.selectbox(
+            "Agrupar gráfico por categoría:", categorical_cols
+        )
+        # Agrupar datos para mostrar un gráfico limpio
+        df_grouped = (
+            df_procesado.groupby(col_cat)[col_metrica].sum().reset_index()
+        )
+        st.bar_chart(df_grouped.set_index(col_cat))
+      else:
+        st.line_chart(df_procesado[col_metrica])
     else:
       st.info(
-          "No se detectaron columnas numéricas para calcular métricas"
+          "No se detectaron columnas numéricas para generar métricas"
           " automáticas."
       )
 
-    # 4. Botón de Descarga del Archivo Limpio
-    st.subheader("📥 Descargar Reporte Automatizado")
+    # 4. Vista previa de la tabla de datos
+    with st.expander("🔍 Ver tabla de datos procesados"):
+      st.dataframe(df_procesado, use_container_width=True)
+
+    # 5. Botón de Descarga del Archivo Limpio
+    st.subheader("📥 Exportar Reporte")
 
 
     def convertir_a_excel(df):
       output = io.BytesIO()
       with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Datos_Procesados")
+        df.to_excel(writer, index=False, sheet_name="Consolidado_Limpio")
       return output.getvalue()
 
 
     excel_data = convertir_a_excel(df_procesado)
 
     st.download_button(
-        label="📥 Descargar Excel Limpio y Consolidado",
+        label="📥 Descargar Excel Limpio",
         data=excel_data,
-        file_name="reporte_ventas_despacho_limpio.xlsx",
+        file_name="reporte_visual_limpio.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ),
