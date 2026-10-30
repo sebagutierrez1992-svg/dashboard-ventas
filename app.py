@@ -1,147 +1,174 @@
 import io
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-# Configuración de la página
 st.set_page_config(
-    page_title="Dashboard de Ventas y Despachos",
-    page_icon="📊",
+    page_title="Gestor de Pedidos & Despachos",
+    page_icon="📦",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("📊 Panel Interactivo de Ventas y Despachos")
+# Estilos ejecutivos
 st.markdown(
-    "Sube tu archivo Excel (`.xlsm`, `.xlsx`) para visualizar métricas,"
-    " gráficos y limpiar los datos automáticamente."
+    """
+    <style>
+    div[data-testid="stMetric"] {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border: 1px solid #334155;
+        padding: 16px;
+        border-radius: 12px;
+    }
+    div[data-testid="stMetricLabel"] { color: #94a3b8 !important; font-weight: 600 !important; }
+    div[data-testid="stMetricValue"] { color: #38bdf8 !important; font-weight: 700 !important; }
+    </style>
+""",
+    unsafe_allow_html=True,
 )
 
-# 1. Componente para cargar el archivo
-uploaded_file = st.file_uploader(
-    "Selecciona o arrastra tu archivo de datos", type=["xlsx", "xlsm", "csv"]
+st.title("📦 Sistema de Seguimiento y Carga de Pedidos")
+st.caption(
+    "Acumula y actualiza tu base de datos de pedidos subiendo planillas"
+    " periódicas."
 )
 
-if uploaded_file is not None:
-  try:
-    # Lectura del archivo según su formato
-    if uploaded_file.name.endswith(".csv"):
-      df_raw = pd.read_csv(uploaded_file)
-      sheet_names = [None]
-    else:
-      xl = pd.ExcelFile(uploaded_file)
-      sheet_names = xl.sheet_names
+# Inicializar la base de datos en la memoria de la sesión
+if "pedidos_db" not in st.session_state:
+  st.session_state.pedidos_db = pd.DataFrame()
 
-    selected_sheet = st.selectbox(
-        "Selecciona la hoja de trabajo:", sheet_names
-    )
+# Sidebar para carga acumulativa
+with st.sidebar:
+  st.header("📥 Cargar Nuevos Pedidos")
+  uploaded_file = st.file_uploader(
+      "Subir planilla (.xlsx, .xlsm, .csv):", type=["xlsx", "xlsm", "csv"]
+  )
 
-    # Selector de la fila de encabezados por si la tabla empieza más abajo
-    header_row = st.number_input(
-        "Fila donde están los encabezados (0 es la primera fila):",
-        min_value=0,
-        max_value=10,
-        value=0,
-        step=1,
-    )
+  if uploaded_file is not None:
+    try:
+      if uploaded_file.name.endswith(".csv"):
+        df_nuevo = pd.read_csv(uploaded_file)
+      else:
+        xl = pd.ExcelFile(uploaded_file)
+        sheet_selected = st.selectbox("Hoja:", xl.sheet_names)
+        df_nuevo = pd.read_excel(uploaded_file, sheet_name=sheet_selected)
 
-    if uploaded_file.name.endswith(".csv"):
-      df = pd.read_csv(uploaded_file, header=header_row)
-    else:
-      df = pd.read_excel(
-          uploaded_file, sheet_name=selected_sheet, header=header_row
-      )
+      df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.str.contains("^Unnamed")]
+      df_nuevo = df_nuevo.dropna(how="all")
+      df_nuevo.columns = [
+          str(col).replace("_", " ").title().strip() for col in df_nuevo.columns
+      ]
 
-    # Eliminar columnas que no tengan nombre o sean totalmente nulas
-    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-    df = df.dropna(how="all")
+      if st.button("➕ Anexar / Actualizar a Base General", use_container_width=True):
+        if st.session_state.pedidos_db.empty:
+          st.session_state.pedidos_db = df_nuevo
+        else:
+          st.session_state.pedidos_db = pd.concat(
+              [st.session_state.pedidos_db, df_nuevo], ignore_index=True
+          )
 
-    st.success(
-        f"¡Archivo cargado con éxito! Se procesaron {len(df):,} registros y"
-        f" {len(df.columns)} columnas válidas."
-    )
+        # Eliminar duplicados si existen registros idénticos
+        st.session_state.pedidos_db = (
+            st.session_state.pedidos_db.drop_duplicates()
+        )
+        st.success("¡Base de pedidos actualizada exitosamente!")
+    except Exception as e:
+      st.error(f"Error al leer el archivo: {e}")
 
-    df_procesado = df.copy()
+  st.markdown("---")
+  if not st.session_state.pedidos_db.empty:
+    if st.button("🗑️ Limpiar Base Consolidada", use_container_width=True):
+      st.session_state.pedidos_db = pd.DataFrame()
+      st.rerun()
 
-    # 2. Resumen Ejecutivo (Métricas Principales)
-    st.subheader("📈 Resumen Ejecutivo")
-    numeric_cols = df_procesado.select_dtypes(
-        include=["number"]
-    ).columns.tolist()
+# Despliegue de datos y métricas
+df_main = st.session_state.pedidos_db
+
+if not df_main.empty:
+  tab1, tab2, tab3 = st.tabs(
+      ["📊 Vista General de Pedidos", "🔍 Detalle de Registros", "📥 Exportar Base"]
+  )
+
+  numeric_cols = df_main.select_dtypes(include=["number"]).columns.tolist()
+  categorical_cols = df_main.select_dtypes(
+      include=["object", "category", "bool"]
+  ).columns.tolist()
+
+  with tab1:
+    st.subheader("📌 Resumen Consolidado")
+    k1, k2, k3 = st.columns(3)
+
+    k1.metric("Total Pedidos Registrados", f"{len(df_main):,}")
 
     if numeric_cols:
-      col_metrica = st.selectbox(
-          "Métrica principal a analizar (Columna numérica):", numeric_cols
-      )
-      # Limpiar valores nulos de la métrica seleccionada
-      df_procesado[col_metrica] = pd.to_numeric(
-          df_procesado[col_metrica], errors="coerce"
-      )
+      col_m = k2.selectbox("Métrica Financiera/Cantidad:", numeric_cols)
+      k2.metric(f"Monto Total {col_m}", f"${df_main[col_m].sum():,.2f}")
+      k3.metric(f"Promedio por Pedido", f"${df_main[col_m].mean():,.2f}")
 
-      total_suma = df_procesado[col_metrica].sum()
-      promedio = df_procesado[col_metrica].mean()
+    st.markdown("---")
+    st.subheader("📈 Distribución de Pedidos")
+    c_left, c_right = st.columns(2)
 
-      m1, m2, m3 = st.columns(3)
-      m1.metric("Total de Registros", f"{len(df_procesado):,}")
-      m2.metric(f"Suma Total de {col_metrica}", f"{total_suma:,.2f}")
-      m3.metric(f"Promedio de {col_metrica}", f"{promedio:,.2f}")
-
-      # 3. Visualización Gráfica Interactiva
-      st.subheader("📊 Análisis Gráfico")
-      categorical_cols = df_procesado.select_dtypes(
-          include=["object", "category", "bool"]
-      ).columns.tolist()
-
-      if categorical_cols:
-        col_cat = st.selectbox(
-            "Agrupar gráfico por categoría:", categorical_cols
+    if categorical_cols:
+      with c_left:
+        group_col = st.selectbox(
+            "Ver cantidad por estado / categoría:", categorical_cols, index=0
         )
-        try:
-          # Agrupar y asegurar datos limpios para el gráfico
-          df_grouped = (
-              df_procesado.groupby(col_cat)[col_metrica]
-              .sum()
-              .reset_index()
-              .dropna()
-          )
-          if not df_grouped.empty:
-            st.bar_chart(df_grouped.set_index(col_cat))
-          else:
-            st.info("No hay suficientes datos agrupados para mostrar el gráfico.")
-        except Exception as chart_err:
-          st.warning(
-              f"No se pudo generar el gráfico con esta categoría: {chart_err}"
-          )
-      else:
-        st.line_chart(df_procesado[col_metrica])
-    else:
-      st.info(
-          "No se detectaron columnas numéricas válidas para generar métricas."
-      )
+        df_count = (
+            df_main.groupby(group_col).size().reset_index(name="Cantidad")
+        )
 
-    # 4. Vista previa de la tabla de datos
-    with st.expander("🔍 Ver tabla de datos procesados"):
-      st.dataframe(df_procesado, use_container_width=True)
+        fig_bar = px.bar(
+            df_count,
+            x=group_col,
+            y="Cantidad",
+            title=f"Pedidos por {group_col}",
+            text="Cantidad",
+            template="plotly_dark",
+            color_discrete_sequence=["#38bdf8"],
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-    # 5. Botón de Descarga del Archivo Limpio
-    st.subheader("📥 Exportar Reporte")
+      with c_right:
+        if len(categorical_cols) > 1:
+          pie_col = st.selectbox("Distribución Porcentual:", categorical_cols, index=1)
+        else:
+          pie_col = group_col
 
+        df_pie = df_main.groupby(pie_col).size().reset_index(name="Cantidad")
+        fig_pie = px.pie(
+            df_pie,
+            names=pie_col,
+            values="Cantidad",
+            title=f"Proporción por {pie_col}",
+            hole=0.4,
+            template="plotly_dark",
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-    def convertir_a_excel(df_to_save):
-      output = io.BytesIO()
-      with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_to_save.to_excel(writer, index=False, sheet_name="Consolidado_Limpio")
-      return output.getvalue()
+  with tab2:
+    st.subheader("📋 Consolidado Total de Pedidos")
+    st.dataframe(df_main, use_container_width=True, height=500)
 
+  with tab3:
+    st.subheader("📥 Exportar Histórico Completo")
 
-    excel_data = convertir_a_excel(df_procesado)
+    def descargar_excel(df_download):
+      buffer = io.BytesIO()
+      with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_download.to_excel(
+            writer, index=False, sheet_name="Pedidos_Consolidados"
+        )
+      return buffer.getvalue()
 
     st.download_button(
-        label="📥 Descargar Excel Limpio",
-        data=excel_data,
-        file_name="reporte_visual_limpio.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
+        label="📥 Descargar Base Completa (.xlsx)",
+        data=descargar_excel(df_main),
+        file_name="historico_pedidos_actualizado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
-  except Exception as e:
-    st.error(f"Ocurrió un error al procesar el archivo: {e}")
+else:
+  st.info(
+      "👈 Comienza cargando tu primera planilla en el panel lateral para dar de"
+      " alta los pedidos."
+  )
