@@ -8,7 +8,7 @@ from stock_metrics import (
     consolidate_inventory,
 )
 
-from config.settings import (
+from settings import (
     APP_TITLE,
     BASE_DIR,
     ERP_SALES_FILE,
