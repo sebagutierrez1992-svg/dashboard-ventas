@@ -24,20 +24,41 @@ if uploaded_file is not None:
   try:
     # Lectura del archivo según su formato
     if uploaded_file.name.endswith(".csv"):
-      df = pd.read_csv(uploaded_file)
+      df_raw = pd.read_csv(uploaded_file)
+      sheet_names = [None]
     else:
       xl = pd.ExcelFile(uploaded_file)
-      selected_sheet = st.selectbox(
-          "Selecciona la hoja de trabajo:", xl.sheet_names
+      sheet_names = xl.sheet_names
+
+    selected_sheet = st.selectbox(
+        "Selecciona la hoja de trabajo:", sheet_names
+    )
+
+    # Selector de la fila de encabezados por si la tabla empieza más abajo
+    header_row = st.number_input(
+        "Fila donde están los encabezados (0 es la primera fila):",
+        min_value=0,
+        max_value=10,
+        value=0,
+        step=1,
+    )
+
+    if uploaded_file.name.endswith(".csv"):
+      df = pd.read_csv(uploaded_file, header=header_row)
+    else:
+      df = pd.read_excel(
+          uploaded_file, sheet_name=selected_sheet, header=header_row
       )
-      df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+
+    # Eliminar columnas que no tengan nombre o sean totalmente nulas
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    df = df.dropna(how="all")
 
     st.success(
         f"¡Archivo cargado con éxito! Se procesaron {len(df):,} registros y"
-        f" {len(df.columns)} columnas."
+        f" {len(df.columns)} columnas válidas."
     )
 
-    # Limpieza básica automática opcional
     df_procesado = df.copy()
 
     # 2. Resumen Ejecutivo (Métricas Principales)
@@ -50,6 +71,11 @@ if uploaded_file is not None:
       col_metrica = st.selectbox(
           "Métrica principal a analizar (Columna numérica):", numeric_cols
       )
+      # Limpiar valores nulos de la métrica seleccionada
+      df_procesado[col_metrica] = pd.to_numeric(
+          df_procesado[col_metrica], errors="coerce"
+      )
+
       total_suma = df_procesado[col_metrica].sum()
       promedio = df_procesado[col_metrica].mean()
 
@@ -61,24 +87,34 @@ if uploaded_file is not None:
       # 3. Visualización Gráfica Interactiva
       st.subheader("📊 Análisis Gráfico")
       categorical_cols = df_procesado.select_dtypes(
-          include=["object", "category"]
+          include=["object", "category", "bool"]
       ).columns.tolist()
 
       if categorical_cols:
         col_cat = st.selectbox(
             "Agrupar gráfico por categoría:", categorical_cols
         )
-        # Agrupar datos para mostrar un gráfico limpio
-        df_grouped = (
-            df_procesado.groupby(col_cat)[col_metrica].sum().reset_index()
-        )
-        st.bar_chart(df_grouped.set_index(col_cat))
+        try:
+          # Agrupar y asegurar datos limpios para el gráfico
+          df_grouped = (
+              df_procesado.groupby(col_cat)[col_metrica]
+              .sum()
+              .reset_index()
+              .dropna()
+          )
+          if not df_grouped.empty:
+            st.bar_chart(df_grouped.set_index(col_cat))
+          else:
+            st.info("No hay suficientes datos agrupados para mostrar el gráfico.")
+        except Exception as chart_err:
+          st.warning(
+              f"No se pudo generar el gráfico con esta categoría: {chart_err}"
+          )
       else:
         st.line_chart(df_procesado[col_metrica])
     else:
       st.info(
-          "No se detectaron columnas numéricas para generar métricas"
-          " automáticas."
+          "No se detectaron columnas numéricas válidas para generar métricas."
       )
 
     # 4. Vista previa de la tabla de datos
@@ -89,10 +125,10 @@ if uploaded_file is not None:
     st.subheader("📥 Exportar Reporte")
 
 
-    def convertir_a_excel(df):
+    def convertir_a_excel(df_to_save):
       output = io.BytesIO()
       with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Consolidado_Limpio")
+        df_to_save.to_excel(writer, index=False, sheet_name="Consolidado_Limpio")
       return output.getvalue()
 
 
