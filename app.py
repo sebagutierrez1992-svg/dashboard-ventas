@@ -1,6 +1,9 @@
 import streamlit as st
+import altair as alt
+from html import escape
 
-from analytics.stock_metrics import (
+# Importación directa desde la raíz, sin carpetas intermedias
+from stock_metrics import (
     stock_view,
     consolidate_inventory,
 )
@@ -16,21 +19,27 @@ from config.settings import (
 
 from services.erp_sales import read_sales_source
 from services.erp_stock import read_stock_source
-from services.remote_stock import load_remote_stock
+from services.wms_stock_repository import load_hybrid_stock
 from services.storage import load_source
+from services.auth_service import get_effective_permissions
 
 from ui.components import render_html
 from ui.styles import apply_styles
 
-from views import (
-    marketplaces,
-    metricas_stock,
-    metricas_vendedores,
-    plantillas,
-    resumen_ejecutivo,
-    stock_general,
-    inicio,
-)
+# Vistas directas desde la raíz
+import login
+import crm
+import integracion_erp
+import marketplaces
+import marketing
+import metricas_stock
+import metricas_vendedores
+import plantillas
+import resumen_ejecutivo
+import stock_general
+import inicio
+import monitor_pedidos
+import usuarios
 
 
 # ============================================================
