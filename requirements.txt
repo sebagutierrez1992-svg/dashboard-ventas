@@ -1,12 +1,11 @@
 streamlit
 pandas
-altair
 openpyxl
+plotly
 xlrd>=2.0.1
 lxml
-pytest
 psycopg[binary]>=3.2
 openai>=1.0.0
 python-dotenv
 bcrypt
-beautifulsoup4truststore>=0.10,<1
+beautifulsoup4
