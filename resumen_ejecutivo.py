@@ -1,0 +1,3726 @@
+import html
+from datetime import date
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+from analytics.sales_metrics import calculate_commercial_totals, filter_sales
+from services.commercial_dashboard_service import (
+    commercial_metrics,
+    filter_commercial_view,
+    prepare_commercial_base,
+)
+from ui.components import page_header, render_html
+from utils.dates import available_months, month_bounds, month_label_es
+from utils.numbers import format_clp
+
+
+VAT_RATE = 0.19
+VALID_GROUPS = ["Factura", "Boleta", "Nota de crédito"]
+
+# Catálogo comercial aprobado para esta vista.
+# 52 y 53 quedan fuera expresamente.
+SELLER_CATALOG = {
+    "03": ("GC1-DANIEL ALVARADO", "Vendedores"),
+    "04": ("ROXANA VALENCIA", "Vendedores"),
+    "05": ("GRACIELA SANTANDER", "Vendedores"),
+    "06": ("CLAUDIA LOPEZ", "Vendedores"),
+    "07": ("LORENA OPAZO", "Vendedores"),
+    "08": ("MARIO BRITO", "Vendedores"),
+    "09": ("XIMENA CROVETTO", "Vendedores"),
+    "11": ("CAROLINA CROCKETT", "Vendedores"),
+    "12": ("JOSE GONZALEZ", "Vendedores"),
+    "16": ("MATIAS CHOMALI", "Vendedores"),
+    "30": ("VENDEDOR ECOMMERS B2C", "Ecommerce / Marketplace"),
+    "31": ("VENDEDOR ECOMMERS NOLK", "Ecommerce / Marketplace"),
+    "32": ("VENDEDOR ECOMMERS", "Ecommerce / Marketplace"),
+    "34": ("MKP MERCADO LIBRE", "Ecommerce / Marketplace"),
+    "35": ("MKP - PARIS", "Ecommerce / Marketplace"),
+    "43": ("SEBASTIAN ROCCO", "Vendedores"),
+    "44": ("MACARENA DE LA ORDEN", "Vendedores"),
+    "45": ("MARIELY ROSALES", "Vendedores"),
+    "46": ("MELANY VARGAS", "Vendedores"),
+    "47": ("MARIA BERNARD", "Vendedores"),
+    "48": ("EURO QUIÑONEZ", "Vendedores"),
+    "49": ("FRANCISCO PEREZ", "Vendedores"),
+    "50": ("GINO MATIUS", "Vendedores"),
+    "51": ("NELSON SAN MARTIN", "Vendedores"),
+    "54": ("JOHANA OBREQUE", "Vendedores"),
+    "60": ("JOSE LUIS ROLLANO", "Vendedores"),
+    "70": ("ANDRES ESPINOZA", "Vendedores"),
+}
+
+
+def _norm_text(value):
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+        .replace("_", " ")
+        .replace("-", " ")
+    )
+
+
+def _seller_key(value):
+    raw = str(value or "").strip()
+    norm = _norm_text(raw)
+
+    # Primero intenta leer código al inicio o valor numérico.
+    raw_code = raw.split(".")[0] if raw.replace(".", "", 1).isdigit() else raw
+    raw_code = raw_code.zfill(2) if raw_code.isdigit() and len(raw_code) <= 2 else raw_code
+
+    if raw_code in SELLER_CATALOG:
+        return raw_code
+
+    for code, (name, _) in SELLER_CATALOG.items():
+        if raw == code or raw.startswith(code + " ") or raw.startswith(code + "-"):
+            return code
+        nname = _norm_text(name)
+        if norm == nname or (nname and nname in norm):
+            return code
+
+    return None
+
+
+def _prepare_sellers(df):
+    out = df.copy()
+    if "Vendedor" not in out.columns:
+        out["_VendedorCodigo"] = None
+        out["_VendedorNombre"] = "Sin vendedor"
+        out["_VendedorGrupo"] = "Otros"
+        return out
+
+    out["_VendedorCodigo"] = out["Vendedor"].map(_seller_key)
+    out["_VendedorNombre"] = out["_VendedorCodigo"].map(
+        lambda c: SELLER_CATALOG[c][0] if c in SELLER_CATALOG else None
+    )
+    out["_VendedorGrupo"] = out["_VendedorCodigo"].map(
+        lambda c: SELLER_CATALOG[c][1] if c in SELLER_CATALOG else None
+    )
+    return out
+
+
+def _find_column(columns, candidates):
+    normalized = {_norm_text(c): c for c in columns}
+    for candidate in candidates:
+        key = _norm_text(candidate)
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def _signed_amount(df, no_vat=False):
+    if df.empty:
+        return pd.Series(dtype="float64")
+
+    amount = pd.to_numeric(df["VentaMonto_num"], errors="coerce").fillna(0).abs()
+    if no_vat:
+        amount = amount / (1 + VAT_RATE)
+
+    sign = df["Grupo comercial"].map(
+        {"Factura": 1, "Boleta": 1, "Nota de crédito": -1}
+    ).fillna(0)
+    return amount * sign
+
+
+def _group_amount(df, group, no_vat=False):
+    part = df[df["Grupo comercial"].eq(group)]
+    if part.empty:
+        return 0.0
+    amount = pd.to_numeric(part["VentaMonto_num"], errors="coerce").fillna(0).abs()
+    if no_vat:
+        amount = amount / (1 + VAT_RATE)
+    return float(amount.sum())
+
+
+def _pct_change(current, previous):
+    current = float(current or 0)
+    previous = float(previous or 0)
+    if previous == 0:
+        return 100.0 if current > 0 else 0.0
+    return ((current - previous) / abs(previous)) * 100
+
+
+def _fmt_pct(value, signed=True):
+    if pd.isna(value):
+        value = 0
+    text = f"{value:+.1f}%" if signed else f"{value:.1f}%"
+    return text.replace(".", ",")
+
+
+def _safe_period(value, fallback_start, fallback_end):
+    if isinstance(value, (tuple, list)):
+        if len(value) >= 2:
+            return value[0], value[1]
+        if len(value) == 1:
+            return value[0], value[0]
+        return fallback_start, fallback_end
+    if isinstance(value, (date, pd.Timestamp)):
+        return value, value
+    return fallback_start, fallback_end
+
+
+def _previous_period(start_date, end_date):
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    days = max((end_ts - start_ts).days + 1, 1)
+    prev_end = start_ts - pd.Timedelta(days=1)
+    prev_start = prev_end - pd.Timedelta(days=days - 1)
+    return prev_start.date(), prev_end.date()
+
+
+def _date_filter(df, start_date, end_date):
+    if df.empty:
+        return df.copy()
+    dates = df["Fecha_dt"].dt.date
+    return df[(dates >= start_date) & (dates <= end_date)].copy()
+
+
+def _metrics(df, no_vat, client_col):
+    totals = calculate_commercial_totals(df, VAT_RATE)
+    net = float(totals["venta_neta_sin_iva"] if no_vat else totals["venta_neta_con_iva"])
+    gross = float(totals["ventas_brutas_sin_iva"] if no_vat else totals["ventas_brutas_con_iva"])
+    credits = float(totals["notas_credito_sin_iva"] if no_vat else totals["notas_credito_con_iva"])
+
+    sale_docs = df[df["Grupo comercial"].isin(["Factura", "Boleta"])]
+    docs = int(sale_docs["Numero"].nunique()) if "Numero" in sale_docs.columns else int(len(sale_docs))
+
+    if client_col and client_col in sale_docs.columns:
+        clients = int(
+            sale_docs[client_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .nunique()
+        )
+    else:
+        clients = 0
+
+    ticket = gross / docs if docs else 0.0
+
+    return {
+        "net": net,
+        "gross": gross,
+        "credits": credits,
+        "docs": docs,
+        "clients": clients,
+        "ticket": ticket,
+    }
+
+
+def _kpi_card(icon, label, value, variation, icon_class="green", invert=False):
+    good = variation <= 0 if invert else variation >= 0
+    trend_class = "trend-up" if good else "trend-down"
+    arrow = "▲" if variation >= 0 else "▼"
+    return f"""
+    <div class="re-kpi">
+      <div class="re-kpi-top">
+        <div class="re-icon {icon_class}">{icon}</div>
+        <div class="re-kpi-copy">
+          <div class="re-kpi-label">{html.escape(label)}</div>
+          <div class="re-kpi-value">{html.escape(str(value))}</div>
+        </div>
+      </div>
+      <div class="re-kpi-foot">
+        <span>vs período anterior</span>
+        <strong class="{trend_class}">{arrow} {_fmt_pct(abs(variation), signed=False)}</strong>
+      </div>
+    </div>
+    """
+
+
+def _client_table(df, no_vat, client_col, legal_col):
+    if df.empty or not client_col:
+        return pd.DataFrame(columns=["Cliente", "Venta neta"])
+
+    work = df.copy()
+    work["_VentaNeta"] = _signed_amount(work, no_vat)
+
+    group_cols = [c for c in [legal_col, client_col] if c and c in work.columns]
+    if not group_cols:
+        return pd.DataFrame(columns=["Cliente", "Venta neta"])
+
+    out = (
+        work.groupby(group_cols, dropna=False)["_VentaNeta"]
+        .sum()
+        .reset_index()
+        .sort_values("_VentaNeta", ascending=False)
+    )
+
+    if client_col in out.columns:
+        out["Cliente"] = out[client_col].fillna("Sin razón social").astype(str)
+    elif legal_col in out.columns:
+        out["Cliente"] = out[legal_col].fillna("Sin cliente").astype(str)
+
+    out["Venta neta"] = out["_VentaNeta"]
+    return out[["Cliente", "Venta neta"]]
+
+
+
+def _document_detail(df, no_vat, client_col, legal_col):
+    """Una fila por documento de venta, lista para consulta/búsqueda."""
+    if df.empty:
+        return pd.DataFrame(columns=["Fecha", "Documento", "Tipo", "Código cliente", "Cliente", "Venta neta"])
+
+    work = df[df["Grupo comercial"].isin(["Factura", "Boleta"])].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["Fecha", "Documento", "Tipo", "Código cliente", "Cliente", "Venta neta"])
+
+    work["_VentaNeta"] = _signed_amount(work, no_vat)
+
+    group_cols = [c for c in ["Fecha_dt", "Numero", "TipoDocto", "Grupo comercial"] if c in work.columns]
+    agg = {"_VentaNeta": "sum"}
+    if legal_col and legal_col in work.columns:
+        agg[legal_col] = "first"
+    if client_col and client_col in work.columns:
+        agg[client_col] = "first"
+
+    out = work.groupby(group_cols, dropna=False).agg(agg).reset_index()
+    out = out.sort_values("Fecha_dt", ascending=False)
+
+    result = pd.DataFrame()
+    result["Fecha"] = pd.to_datetime(out["Fecha_dt"], errors="coerce").dt.strftime("%d-%m-%Y")
+    result["Documento"] = out["Numero"].fillna("").astype(str) if "Numero" in out.columns else ""
+    result["Tipo"] = (
+        out["TipoDocto"].fillna("").astype(str)
+        if "TipoDocto" in out.columns
+        else out["Grupo comercial"].fillna("").astype(str)
+    )
+    result["Código cliente"] = (
+        out[legal_col].fillna("").astype(str)
+        if legal_col and legal_col in out.columns
+        else ""
+    )
+    result["Cliente"] = (
+        out[client_col].fillna("").astype(str)
+        if client_col and client_col in out.columns
+        else ""
+    )
+    result["Venta neta"] = out["_VentaNeta"].round(0).astype(float)
+    return result
+
+
+def _document_key(value) -> str:
+    """Normaliza correlativos ERP/WMS sin perder la equivalencia por ceros."""
+    text = str(value or "").strip().replace(".0", "")
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return digits.lstrip("0") or digits
+
+
+def _client_key(value) -> str:
+    text = _norm_text(value)
+    return "".join(char for char in text if char.isalnum())
+
+
+def _current_seller_code() -> str | None:
+    user = st.session_state.get("auth_user") or {}
+    code = str(user.get("seller_code") or "").strip().zfill(2)
+    return code if code in SELLER_CATALOG else None
+
+
+def _seller_order_map(base: pd.DataFrame) -> pd.DataFrame:
+    required = {"Numero", "Vendedor", "RazonSocial"}
+    if base is None or base.empty or not required.issubset(base.columns):
+        return pd.DataFrame(columns=["_PedidoKey", "_ClienteKey", "Vendedor", "Código vendedor"])
+    work = base[["Numero", "Vendedor", "RazonSocial"]].copy()
+    work["_VendedorCodigo"] = work["Vendedor"].map(_seller_key)
+    work["_VendedorNombre"] = work["_VendedorCodigo"].map(
+        lambda code: SELLER_CATALOG[code][0] if code in SELLER_CATALOG else None
+    )
+    work = work[work["_VendedorCodigo"].notna()].copy()
+    work["_PedidoKey"] = work["Numero"].map(_document_key)
+    work["_ClienteKey"] = work["RazonSocial"].map(_client_key)
+    work = work[work["_PedidoKey"].ne("")]
+    work = work.drop_duplicates(["_PedidoKey", "_ClienteKey"], keep="last")
+    result = pd.DataFrame(index=work.index)
+    result["_PedidoKey"] = work["_PedidoKey"]
+    result["_ClienteKey"] = work["_ClienteKey"]
+    result["Vendedor"] = work["_VendedorNombre"]
+    result["C?digo vendedor"] = work["_VendedorCodigo"]
+    return result
+
+
+def _load_commercial_orders(
+    base: pd.DataFrame,
+    seller_code: str | None,
+):
+    """
+    Reutiliza las mismas fuentes de Monitor Pedidos.
+
+    Prioridad vendedor:
+    1. Listado web WMS.
+    2. Monitor operacional.
+    3. Planilla ERP como respaldo.
+    """
+    try:
+        from views.monitor_pedidos import (
+            _load_live,
+            _prepare,
+            _attach_operational_sellers,
+            _attach_web_sellers,
+            _attach_sellers,
+        )
+
+        result = _load_live()
+
+        if not result.get("ok"):
+            return (
+                pd.DataFrame(),
+                str(
+                    result.get("error")
+                    or "WMS no disponible"
+                ),
+            )
+
+        orders = _prepare(
+            result.get("detail") or {}
+        )
+
+        if orders.empty:
+            return (
+                orders,
+                "El WMS no devolvi? pedidos en proceso.",
+            )
+
+        orders = _attach_operational_sellers(
+            orders,
+            result.get("operational") or {},
+        )
+
+        orders = _attach_web_sellers(orders)
+
+        orders = _attach_sellers(
+            orders,
+            base,
+        )
+
+        if seller_code:
+            orders = orders[
+                orders["_seller_code"].eq(
+                    seller_code
+                )
+            ].copy()
+
+        return orders, ""
+
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+@st.dialog(
+    "Seguimiento del pedido",
+    width="large",
+)
+def _render_executive_order_dialog(
+    row: pd.Series,
+) -> None:
+    """
+    Ventana de seguimiento reutilizando la información y
+    diagnóstico oficial de Monitor Pedidos.
+    """
+    from views.monitor_pedidos import (
+        _flow_states,
+        _render_detail,
+        _apply_styles,
+        _apply_redesign_overrides,
+    )
+
+    # re_monitor_styles_in_dialog
+    # Carga en el modal los mismos estilos utilizados por
+    # Monitor Pedidos para tarjetas, avance, productos y alertas.
+    _apply_styles()
+    _apply_redesign_overrides()
+
+    # re_modal_visual_v2
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] > div{
+            width:min(1500px,96vw) !important;
+            max-width:96vw !important;
+            max-height:94vh !important;
+            padding:22px 24px !important;
+            border-radius:20px !important;
+            border:1px solid #2b4658 !important;
+            background:
+                radial-gradient(
+                    circle at 88% 0%,
+                    rgba(31,88,117,.20),
+                    transparent 34%
+                ),
+                linear-gradient(
+                    145deg,
+                    #07131c,
+                    #091a25
+                ) !important;
+            box-shadow:
+                0 35px 100px rgba(0,0,0,.70)
+                !important;
+        }
+
+        div[data-testid="stDialog"] h2{
+            color:#ffffff !important;
+            font-size:23px !important;
+            font-weight:900 !important;
+        }
+
+        div[data-testid="stDialog"]
+        [data-testid="stMetric"]{
+            min-height:108px;
+            padding:16px 18px;
+            border-radius:14px;
+            border:1px solid #2a4556;
+            background:
+                linear-gradient(
+                    145deg,
+                    rgba(16,38,52,.98),
+                    rgba(8,25,36,.98)
+                );
+        }
+
+        div[data-testid="stDialog"]
+        [data-testid="stMetricLabel"]{
+            color:#80a0b2 !important;
+            font-size:10px !important;
+            font-weight:800 !important;
+            text-transform:uppercase;
+            letter-spacing:.06em;
+        }
+
+        div[data-testid="stDialog"]
+        [data-testid="stMetricValue"]{
+            color:#ffffff !important;
+            font-weight:900 !important;
+        }
+
+        div[data-testid="stDialog"]
+        [data-baseweb="tab-list"]{
+            padding:5px;
+            gap:5px;
+            border:1px solid #294354;
+            border-radius:12px;
+            background:#07151e;
+        }
+
+        div[data-testid="stDialog"]
+        [data-baseweb="tab"]{
+            padding:10px 20px;
+            border-radius:9px;
+        }
+
+        div[data-testid="stDialog"]
+        [aria-selected="true"]{
+            color:#ffc400 !important;
+            background:rgba(255,196,0,.12) !important;
+        }
+
+        div[data-testid="stDialog"]
+        [data-testid="stDataFrame"]{
+            border:1px solid #294354;
+            border-radius:13px;
+            overflow:hidden;
+        }
+
+        div[data-testid="stDialog"]
+        [data-testid="stProgress"]{
+            padding:14px;
+            border:1px solid #294354;
+            border-radius:13px;
+            background:#091a24;
+        }
+
+        div[data-testid="stDialog"]
+        button[kind="primary"]{
+            min-height:44px;
+            border-radius:10px;
+            border-color:#ffc400;
+            background:#ffc400;
+            color:#111111;
+            font-weight:850;
+        }
+
+        div[data-testid="stDialog"]
+        button[kind="secondary"]{
+            min-height:44px;
+            border-radius:10px;
+            border-color:#38586b;
+            background:#0b1d29;
+            color:#ffffff;
+            font-weight:750;
+        }
+        
+        /* re_modal_scroll_fix_v1 */
+
+        div[data-testid="stDialog"]{
+            overflow-y:auto !important;
+            overflow-x:hidden !important;
+            align-items:flex-start !important;
+            padding-top:2vh !important;
+            padding-bottom:2vh !important;
+            overscroll-behavior:contain;
+        }
+
+        div[data-testid="stDialog"] > div{
+            max-height:94vh !important;
+            overflow-y:auto !important;
+            overflow-x:hidden !important;
+            overscroll-behavior:contain;
+            scrollbar-width:thin;
+            scrollbar-color:#ffc400 #102531;
+        }
+
+        div[data-testid="stDialog"]
+        div[role="dialog"]{
+            max-height:94vh !important;
+            overflow-y:auto !important;
+            overflow-x:hidden !important;
+            overscroll-behavior:contain;
+            scrollbar-width:thin;
+            scrollbar-color:#ffc400 #102531;
+        }
+
+        div[data-testid="stDialog"]
+        > div::-webkit-scrollbar,
+        div[data-testid="stDialog"]
+        div[role="dialog"]::-webkit-scrollbar{
+            width:10px;
+        }
+
+        div[data-testid="stDialog"]
+        > div::-webkit-scrollbar-track,
+        div[data-testid="stDialog"]
+        div[role="dialog"]::-webkit-scrollbar-track{
+            background:#102531;
+            border-radius:10px;
+        }
+
+        div[data-testid="stDialog"]
+        > div::-webkit-scrollbar-thumb,
+        div[data-testid="stDialog"]
+        div[role="dialog"]::-webkit-scrollbar-thumb{
+            background:#ffc400;
+            border:2px solid #102531;
+            border-radius:10px;
+        }
+
+        div[data-testid="stDialog"]
+        button[aria-label="Close"]{
+            position:sticky !important;
+            top:0 !important;
+            z-index:100 !important;
+            margin-left:auto !important;
+        }
+
+        @media(max-height:800px){
+            div[data-testid="stDialog"] > div,
+            div[data-testid="stDialog"]
+            div[role="dialog"]{
+                max-height:90vh !important;
+            }
+        }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    order = str(
+        row.get("ob_oid") or ""
+    ).strip()
+
+    client = str(
+        row.get("bill_name") or "Cliente no informado"
+    ).strip()
+
+    seller = str(
+        row.get("_seller_name")
+        or "Sin vendedor asociado"
+    ).strip()
+
+    stage = str(
+        row.get("_stage")
+        or row.get("ob_ord_stt")
+        or "Sin estado"
+    ).strip()
+
+    site = str(
+        row.get("sitio") or "?"
+    ).strip()
+
+    dispatch = str(
+        row.get("dest") or "?"
+    ).strip()
+
+    purchase_order = str(
+        row.get("bill_po") or "?"
+    ).strip()
+
+    created = pd.to_datetime(
+        row.get("_date")
+        or row.get("crea_date")
+        or row.get("fecha_creacion"),
+        errors="coerce",
+    )
+
+    created_text = (
+        created.strftime("%d-%m-%Y %H:%M")
+        if pd.notna(created)
+        else "?"
+    )
+
+    def clean_invoice(value):
+        text_value = str(
+            value or ""
+        ).strip()
+
+        if text_value in {
+            "",
+            "0",
+            "0.0",
+            "nan",
+            "None",
+        }:
+            return ""
+
+        digits = "".join(
+            char
+            for char in text_value
+            if char.isdigit()
+        )
+
+        if digits:
+            return digits.zfill(10)
+
+        return text_value
+
+    invoice = (
+        clean_invoice(row.get("num_factura"))
+        or clean_invoice(row.get("d5"))
+        or clean_invoice(row.get("numfactura"))
+    )
+
+    ready_invoice = bool(
+        row.get("_ready_invoice")
+    )
+
+    if invoice:
+        invoice_status = "Facturado"
+        invoice_icon = ""
+    elif ready_invoice:
+        invoice_status = "Por facturar"
+        invoice_icon = "??"
+    else:
+        invoice_status = "Pendiente"
+        invoice_icon = ""
+
+    requested = pd.to_numeric(
+        pd.Series([row.get("ord_qty_total")]),
+        errors="coerce",
+    ).fillna(0).iloc[0]
+
+    completed = pd.to_numeric(
+        pd.Series([row.get("cmp_qty_total")]),
+        errors="coerce",
+    ).fillna(0).iloc[0]
+
+    requested = int(requested)
+    completed = int(completed)
+
+    progress = (
+        round(completed / requested * 100)
+        if requested > 0
+        else 0
+    )
+
+    progress = max(
+        0,
+        min(100, progress),
+    )
+
+    st.markdown(
+        f"""
+        <div style="
+            border:1px solid #274052;
+            background:#091721;
+            border-radius:14px;
+            padding:18px 20px;
+            margin-bottom:14px;
+        ">
+          <div style="
+              display:flex;
+              justify-content:space-between;
+              align-items:flex-start;
+              gap:20px;
+          ">
+            <div>
+              <div style="
+                  color:#7fa7bf;
+                  font-size:12px;
+                  text-transform:uppercase;
+                  letter-spacing:.08em;
+              ">
+                Seguimiento operacional
+              </div>
+              <div style="
+                  color:#ffffff;
+                  font-size:25px;
+                  font-weight:800;
+                  margin-top:3px;
+              ">
+                Pedido {html.escape(order)}
+              </div>
+              <div style="
+                  color:#c8d4dc;
+                  margin-top:5px;
+              ">
+                {html.escape(client)}
+                &nbsp;?&nbsp;
+                {html.escape(seller)}
+              </div>
+            </div>
+            <div style="
+                color:#ffffff;
+                background:#123126;
+                border:1px solid #1e8659;
+                border-radius:999px;
+                padding:8px 14px;
+                font-weight:700;
+                white-space:nowrap;
+            ">
+              {invoice_icon}
+              {html.escape(invoice_status)}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ========================================================
+    # FLUJO DEL PEDIDO
+    # ========================================================
+
+    flow = list(_flow_states(row))
+
+    if invoice:
+        flow = [
+            (
+                label,
+                (
+                    "Completado"
+                    if status in {"done", "current"}
+                    else state
+                ),
+                "done",
+            )
+            for label, state, status in flow
+        ]
+
+        flow.append(
+            (
+                "Facturado",
+                invoice,
+                "current",
+            )
+        )
+    else:
+        flow.append(
+            (
+                "Facturado",
+                "Pendiente",
+                "",
+            )
+        )
+
+    flow_columns = st.columns(len(flow))
+
+    for column, item in zip(
+        flow_columns,
+        flow,
+    ):
+        label, detail, status = item
+
+        if status == "done":
+            icon = "?"
+            color = "#20d67b"
+            border = "#20d67b"
+        elif status == "current":
+            icon = "?"
+            color = "#ffc400"
+            border = "#ffc400"
+        else:
+            icon = "?"
+            color = "#718392"
+            border = "#334957"
+
+        with column:
+            st.markdown(
+                f"""
+                <div style="
+                    min-height:105px;
+                    border:1px solid {border};
+                    border-radius:12px;
+                    background:#0b1923;
+                    padding:12px 8px;
+                    text-align:center;
+                ">
+                  <div style="
+                      color:{color};
+                      font-size:23px;
+                      font-weight:900;
+                  ">
+                    {icon}
+                  </div>
+                  <div style="
+                      color:#ffffff;
+                      font-size:12px;
+                      font-weight:750;
+                      margin-top:4px;
+                  ">
+                    {html.escape(str(label))}
+                  </div>
+                  <div style="
+                      color:#8299a8;
+                      font-size:10px;
+                      margin-top:5px;
+                  ">
+                    {html.escape(str(detail))}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("")
+
+    # ========================================================
+    # KPI PRINCIPALES
+    # ========================================================
+
+    k1, k2, k3, k4 = st.columns(4)
+
+    with k1:
+        st.metric(
+            "Etapa WMS",
+            stage,
+        )
+
+    with k2:
+        st.metric(
+            "Avance",
+            f"{progress}%",
+            f"{completed}/{requested} unidades",
+        )
+
+    with k3:
+        st.metric(
+            "Facturación",
+            invoice_status,
+        )
+
+    with k4:
+        st.metric(
+            "Nº factura",
+            invoice or "?",
+        )
+
+    # ========================================================
+    # PESTA?AS DEL MODAL
+    # ========================================================
+
+    (
+        tab_summary,
+        tab_detail,
+        tab_invoice,
+    ) = st.tabs(
+        [
+            "Resumen",
+            "Detalle y flujo WMS",
+            "Facturación",
+        ]
+    )
+
+    with tab_summary:
+        st.markdown("#### Información del pedido")
+
+        information = pd.DataFrame(
+            [
+                {
+                    "Dato": "Pedido",
+                    "Información": order,
+                },
+                {
+                    "Dato": "Cliente",
+                    "Información": client,
+                },
+                {
+                    "Dato": "Vendedor",
+                    "Información": seller,
+                },
+                {
+                    "Dato": "Fecha creación",
+                    "Información": created_text,
+                },
+                {
+                    "Dato": "Orden de compra",
+                    "Información": purchase_order,
+                },
+                {
+                    "Dato": "Tipo despacho",
+                    "Información": dispatch,
+                },
+                {
+                    "Dato": "Bodega / sitio",
+                    "Información": site,
+                },
+                {
+                    "Dato": "Operador picking",
+                    "Información": str(
+                        row.get("opr_pick") or "?"
+                    ),
+                },
+                {
+                    "Dato": "Operador packing",
+                    "Información": str(
+                        row.get("opr_pack") or "?"
+                    ),
+                },
+            ]
+        )
+
+        st.dataframe(
+            information,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Dato": st.column_config.TextColumn(
+                    "Dato",
+                    width="medium",
+                ),
+                "Información": st.column_config.TextColumn(
+                    "Información",
+                    width="large",
+                ),
+            },
+        )
+
+        st.markdown("#### Avance operativo")
+
+        st.progress(
+            progress,
+            text=(
+                f"{completed} de {requested} "
+                f"unidades procesadas"
+            ),
+        )
+
+        pending = max(
+            requested - completed,
+            0,
+        )
+
+        p1, p2, p3 = st.columns(3)
+
+        p1.metric(
+            "Solicitadas",
+            requested,
+        )
+
+        p2.metric(
+            "Procesadas",
+            completed,
+        )
+
+        p3.metric(
+            "Pendientes",
+            pending,
+        )
+
+    with tab_detail:
+        st.caption(
+            "Información oficial reutilizada desde "
+            "Monitor Pedidos."
+        )
+
+        # Incluye productos, avance por SKU, diagnóstico,
+        # flujo, quiebres y stock alternativo.
+        _render_detail(row)
+
+    with tab_invoice:
+        st.markdown("#### Estado de facturación")
+
+        if invoice:
+            st.success(
+                "El WMS informa que el pedido "
+                "ya tiene factura emitida."
+            )
+        elif ready_invoice:
+            st.warning(
+                "El pedido termin? su proceso WMS "
+                "y se encuentra listo para facturar."
+            )
+        else:
+            st.info(
+                "El pedido contin?a en proceso. "
+                "Todav?a no tiene factura asociada."
+            )
+
+        invoice_table = pd.DataFrame(
+            [
+                {
+                    "Campo": "Estado",
+                    "Valor": invoice_status,
+                },
+                {
+                    "Campo": "Pedido",
+                    "Valor": order,
+                },
+                {
+                    "Campo": "N?mero de factura",
+                    "Valor": invoice or "?",
+                },
+                {
+                    "Campo": "Cliente",
+                    "Valor": client,
+                },
+                {
+                    "Campo": "Vendedor",
+                    "Valor": seller,
+                },
+                {
+                    "Campo": "Avance WMS",
+                    "Valor": f"{progress}%",
+                },
+            ]
+        )
+
+        st.dataframe(
+            invoice_table,
+            hide_index=True,
+            width="stretch",
+        )
+
+    st.divider()
+
+    close_column, monitor_column = st.columns(
+        [1, 2]
+    )
+
+    with close_column:
+        if st.button(
+            "Cerrar",
+            width="stretch",
+            key=f"re_close_dialog_{order}",
+        ):
+            st.rerun()
+
+    with monitor_column:
+        if st.button(
+            "Abrir en Monitor de Pedidos",
+            type="primary",
+            width="stretch",
+            key=f"re_dialog_monitor_{order}",
+        ):
+            st.session_state[
+                "w12_selected_order"
+            ] = order
+
+            st.session_state[
+                "page"
+            ] = "Monitor Pedidos"
+
+            try:
+                st.query_params[
+                    "pedido_wms"
+                ] = order
+            except Exception:
+                pass
+
+            st.rerun()
+
+
+@st.dialog("Seguimiento comercial", width="large")
+def _render_executive_order_dialog_v2(row: pd.Series) -> None:
+    """Modal comercial moderno con resumen, flujo WMS y facturación."""
+    from views.monitor_pedidos import (
+        _apply_redesign_overrides,
+        _apply_styles,
+        _flow_states,
+        _render_detail,
+    )
+
+    _apply_styles()
+    _apply_redesign_overrides()
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] {
+            align-items:flex-start !important;
+            overflow-y:auto !important;
+            padding:2.2vh 0 !important;
+            overscroll-behavior:contain;
+        }
+        div[data-testid="stDialog"] > div,
+        div[data-testid="stDialog"] div[role="dialog"] {
+            width:min(1180px,94vw) !important;
+            max-width:94vw !important;
+            max-height:94vh !important;
+            overflow-y:auto !important;
+            overflow-x:hidden !important;
+            padding:0 !important;
+            border:1px solid #294759 !important;
+            border-radius:18px !important;
+            background:
+                radial-gradient(circle at 92% 0%,rgba(25,91,121,.18),transparent 34%),
+                linear-gradient(145deg,#07131c,#091a25) !important;
+            box-shadow:0 35px 100px rgba(0,0,0,.72) !important;
+            scrollbar-width:thin;
+            scrollbar-color:#4d6979 #102531;
+        }
+        div[data-testid="stDialog"] > div::-webkit-scrollbar,
+        div[data-testid="stDialog"] div[role="dialog"]::-webkit-scrollbar {width:8px}
+        div[data-testid="stDialog"] > div::-webkit-scrollbar-track,
+        div[data-testid="stDialog"] div[role="dialog"]::-webkit-scrollbar-track {
+            background:#102531;border-radius:10px
+        }
+        div[data-testid="stDialog"] > div::-webkit-scrollbar-thumb,
+        div[data-testid="stDialog"] div[role="dialog"]::-webkit-scrollbar-thumb {
+            background:#4d6979;border-radius:10px
+        }
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            position:sticky !important;
+            top:12px !important;
+            margin-left:auto !important;
+            z-index:200 !important;
+            border:1px solid #304b5d !important;
+            border-radius:9px !important;
+            background:#0b1d29 !important;
+        }
+        div[data-testid="stDialog"] h2 {display:none !important}
+        div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {gap:.72rem}
+        div[data-testid="stDialog"] [data-baseweb="tab-list"] {
+            gap:6px !important;
+            padding:5px !important;
+            margin:0 28px !important;
+            border:1px solid #294354 !important;
+            border-radius:12px !important;
+            background:#07151e !important;
+        }
+        div[data-testid="stDialog"] [data-baseweb="tab"] {
+            height:43px !important;
+            padding:0 22px !important;
+            border-radius:9px !important;
+            color:#a9bcc8 !important;
+            font-weight:750 !important;
+        }
+        div[data-testid="stDialog"] [data-baseweb="tab"][aria-selected="true"] {
+            color:#ffc400 !important;
+            background:rgba(255,196,0,.12) !important;
+        }
+        div[data-testid="stDialog"] [data-baseweb="tab-highlight"] {background:#ffc400 !important}
+        div[data-testid="stDialog"] [data-baseweb="tab-panel"] {padding:18px 28px 0 !important}
+        div[data-testid="stDialog"] [data-testid="stDataFrame"] {
+            border:1px solid #294354;border-radius:12px;overflow:hidden
+        }
+        .re2-head {
+            display:flex;justify-content:space-between;align-items:flex-start;
+            gap:22px;padding:6px 30px 18px;margin-top:-34px
+        }
+        .re2-eyebrow {color:#91aabd;font-size:11px;font-weight:850;letter-spacing:.12em}
+        .re2-title {color:#fff;font-size:29px;font-weight:900;line-height:1.12;margin-top:7px}
+        .re2-client {color:#d4dee5;font-size:17px;margin-top:6px}
+        .re2-status {
+            display:inline-flex;align-items:center;gap:9px;color:#dfffee;
+            border:1px solid #168a5c;background:rgba(17,103,70,.24);
+            border-radius:999px;padding:9px 15px;font-size:12px;font-weight:800;
+            white-space:nowrap;margin-top:26px
+        }
+        .re2-status-dot {width:11px;height:11px;border-radius:50%;background:#35dd91;box-shadow:0 0 12px #35dd91}
+        .re2-section-title {color:#fff;font-size:19px;font-weight:850;margin:2px 0 13px}
+        .re2-notice {
+            display:flex;align-items:center;gap:16px;padding:15px 18px;margin-bottom:18px;
+            border:1px solid #e7ba00;border-radius:12px;
+            background:linear-gradient(90deg,rgba(118,92,0,.32),rgba(65,53,10,.22))
+        }
+        .re2-notice-icon {
+            width:42px;height:42px;display:grid;place-items:center;flex:0 0 42px;
+            border-radius:50%;background:#ffd21a;color:#101820;font-size:22px;font-weight:900
+        }
+        .re2-notice strong {display:block;color:#ffe052;font-size:16px}
+        .re2-notice span {display:block;color:#d6e0e6;font-size:12px;margin-top:3px}
+        .re2-flow {display:flex;align-items:flex-start;margin:9px 16px 22px}
+        .re2-step {width:25%;text-align:center;position:relative;color:#8094a2}
+        .re2-step:not(:last-child):after {
+            content:"";position:absolute;top:19px;left:62%;width:76%;height:2px;background:#2a4859
+        }
+        .re2-step.done:not(:last-child):after {background:#36d994}
+        .re2-step.current:not(:last-child):after {background:#ffc400}
+        .re2-step-dot {
+            position:relative;z-index:2;margin:auto;width:38px;height:38px;display:grid;place-items:center;
+            border-radius:50%;border:2px solid #405866;background:#10222d;color:#8295a1;font-weight:900
+        }
+        .re2-step.done .re2-step-dot {border-color:#42da97;background:#42da97;color:#062116}
+        .re2-step.current .re2-step-dot {border-color:#ffc400;background:#ffc400;color:#161100}
+        .re2-step b {display:block;color:#dce7ed;font-size:12px;margin-top:8px}
+        .re2-step small {display:block;font-size:10px;margin-top:2px}
+        .re2-step.done small {color:#42da97}.re2-step.current small{color:#ffc400}
+        .re2-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:4px}
+        .re2-card {
+            min-height:82px;padding:14px 16px;border:1px solid #294759;border-radius:11px;
+            background:linear-gradient(145deg,rgba(14,35,48,.95),rgba(8,24,34,.95))
+        }
+        .re2-card-label {color:#86a1b2;font-size:9px;font-weight:850;letter-spacing:.09em}
+        .re2-card-value {color:#fff;font-size:16px;font-weight:800;margin-top:8px;overflow-wrap:anywhere}
+        .re2-badge {
+            display:inline-flex;align-items:center;color:#ffe36f;background:rgba(255,196,0,.12);
+            border:1px solid rgba(255,196,0,.36);border-radius:999px;padding:6px 11px;font-size:12px
+        }
+        .re2-progress {height:8px;border-radius:999px;background:#17303e;margin-top:8px;overflow:hidden}
+        .re2-progress i {display:block;height:100%;background:#42da97;border-radius:999px}
+        .re2-caption {color:#8fa5b3;font-size:11px;margin:12px 1px 5px}
+        .re2-footer-line {height:1px;background:#294354;margin:13px -28px 2px}
+        div[data-testid="stDialog"] button[kind="primary"] {
+            min-height:44px !important;border-radius:10px !important;border-color:#ffc400 !important;
+            background:#ffc400 !important;color:#151515 !important;font-weight:850 !important
+        }
+        div[data-testid="stDialog"] button[kind="secondary"] {
+            min-height:44px !important;border-radius:10px !important;border-color:#38586b !important;
+            background:#0b1d29 !important;color:#fff !important;font-weight:750 !important
+        }
+        @media(max-width:800px){
+            .re2-head{padding-left:18px;padding-right:18px;flex-direction:column}.re2-status{margin-top:0}
+            .re2-grid{grid-template-columns:1fr}.re2-flow{margin-left:0;margin-right:0}
+            div[data-testid="stDialog"] [data-baseweb="tab-list"]{margin:0 16px!important}
+            div[data-testid="stDialog"] [data-baseweb="tab-panel"]{padding:16px!important}
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    def _text(value, fallback="Sin información"):
+        value = str(value or "").strip()
+        return fallback if value in {"", "0", "0.0", "nan", "None"} else value
+
+    def _invoice(value):
+        value = str(value or "").strip()
+        if value in {"", "0", "0.0", "nan", "None"}:
+            return ""
+        digits = "".join(char for char in value if char.isdigit())
+        return digits.zfill(10) if digits else value
+
+    order = _text(row.get("ob_oid"), "—")
+    client = _text(row.get("bill_name"), "Cliente no informado")
+    seller = _text(row.get("_seller_name"), "Sin vendedor asociado")
+    stage = _text(row.get("_stage") or row.get("ob_ord_stt"), "Sin estado")
+    site = _text(row.get("sitio"), "Sin bodega")
+    dispatch = _text(row.get("dest"), "Sin información")
+    purchase_order = _text(row.get("bill_po"), "Sin información")
+    invoice = _invoice(row.get("num_factura")) or _invoice(row.get("d5")) or _invoice(row.get("numfactura"))
+    ready_invoice = bool(row.get("_ready_invoice"))
+    requested = int(pd.to_numeric(pd.Series([row.get("ord_qty_total")]), errors="coerce").fillna(0).iloc[0])
+    completed = int(pd.to_numeric(pd.Series([row.get("cmp_qty_total")]), errors="coerce").fillna(0).iloc[0])
+    progress = max(0, min(100, round(completed / requested * 100) if requested else 0))
+    invoice_status = "Facturado" if invoice else ("Listo para facturar" if ready_invoice else "En proceso")
+    created = pd.to_datetime(row.get("_date") or row.get("crea_date") or row.get("fecha_creacion"), errors="coerce")
+    created_text = created.strftime("%d-%m-%Y %H:%M") if pd.notna(created) else "Sin información"
+
+    st.markdown(
+        f"""
+        <div class="re2-head">
+          <div><div class="re2-eyebrow">SEGUIMIENTO COMERCIAL</div>
+          <div class="re2-title">Pedido {html.escape(order)}</div>
+          <div class="re2-client">{html.escape(client)}</div></div>
+          <div class="re2-status"><i class="re2-status-dot"></i>Proceso WMS conectado</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_summary, tab_detail, tab_invoice = st.tabs(["Resumen", "Flujo WMS", "Facturación"])
+
+    with tab_summary:
+        st.markdown('<div class="re2-section-title">Información del pedido</div>', unsafe_allow_html=True)
+        summary_cards = [
+            ("PEDIDO", order), ("CLIENTE", client), ("VENDEDOR", seller),
+            ("FECHA DE CREACIÓN", created_text), ("ORDEN DE COMPRA", purchase_order),
+            ("BODEGA / SITIO", site), ("TIPO DE DESPACHO", dispatch),
+            ("ETAPA WMS", stage), ("AVANCE", f"{progress}% · {completed}/{requested} unidades"),
+        ]
+        cards = "".join(
+            f'<div class="re2-card"><div class="re2-card-label">{html.escape(label)}</div>'
+            f'<div class="re2-card-value">{html.escape(value)}</div></div>'
+            for label, value in summary_cards
+        )
+        st.markdown(f'<div class="re2-grid">{cards}</div>', unsafe_allow_html=True)
+
+    with tab_detail:
+        st.caption("Detalle oficial reutilizado desde Monitor de Pedidos.")
+        _render_detail(row)
+
+    with tab_invoice:
+        st.markdown('<div class="re2-section-title">Estado de facturación</div>', unsafe_allow_html=True)
+        if invoice:
+            notice_title = "Documento emitido"
+            notice_text = f"El WMS informa la factura N° {invoice}."
+        elif ready_invoice:
+            notice_title = "Listo para facturar"
+            notice_text = "El proceso WMS está completo. El documento tributario aún no ha sido emitido."
+        else:
+            notice_title = "Pedido en proceso"
+            notice_text = "La factura o boleta estará disponible cuando finalice el proceso WMS."
+        st.markdown(
+            f'<div class="re2-notice"><div class="re2-notice-icon">&#128196;</div><div>'
+            f'<strong>{html.escape(notice_title)}</strong><span>{html.escape(notice_text)}</span></div></div>',
+            unsafe_allow_html=True,
+        )
+
+        flow_items = list(_flow_states(row))
+        compact_flow = []
+        for label, detail, status in flow_items:
+            normalized = str(label).lower()
+            if any(key in normalized for key in ("pedido", "picking", "packing")):
+                compact_flow.append((str(label), str(detail), status))
+        compact_flow = compact_flow[:3]
+        defaults = [("Pedido", "Completado", "done"), ("Picking", "Completado", "done"), ("Packing", "Completado", "done")]
+        while len(compact_flow) < 3:
+            compact_flow.append(defaults[len(compact_flow)])
+        compact_flow.append(("Facturación", "Emitida" if invoice else "Pendiente", "done" if invoice else "current"))
+        flow_html = "".join(
+            f'<div class="re2-step {"done" if status == "done" else "current" if status == "current" else ""}">'
+            f'<div class="re2-step-dot">{"&#10003;" if status == "done" else "&#128196;" if status == "current" else "·"}</div>'
+            f'<b>{html.escape(label)}</b><small>{html.escape(detail)}</small></div>'
+            for label, detail, status in compact_flow
+        )
+        st.markdown(f'<div class="re2-flow">{flow_html}</div>', unsafe_allow_html=True)
+
+        invoice_cards = [
+            ("ESTADO", f'<span class="re2-badge">{html.escape(invoice_status)}</span>'),
+            ("PEDIDO", html.escape(order)),
+            ("DOCUMENTO", html.escape(invoice or "Sin emitir")),
+            ("CLIENTE", html.escape(client)),
+            ("VENDEDOR", html.escape(seller)),
+            ("AVANCE WMS", f'{progress}%<div class="re2-progress"><i style="width:{progress}%"></i></div>'),
+        ]
+        cards = "".join(
+            f'<div class="re2-card"><div class="re2-card-label">{label}</div>'
+            f'<div class="re2-card-value">{value}</div></div>'
+            for label, value in invoice_cards
+        )
+        st.markdown(
+            f'<div class="re2-grid">{cards}</div><div class="re2-caption">'
+            'ⓘ La factura o boleta aparecerá aquí cuando WMS/ERP informe el número.</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="re2-footer-line"></div>', unsafe_allow_html=True)
+    spacer, close_column, monitor_column = st.columns([5.6, 1.25, 1.75])
+    with close_column:
+        if st.button("Cerrar", width="stretch", key=f"re2_close_{order}"):
+            st.rerun()
+    with monitor_column:
+        if st.button("Abrir Monitor", type="primary", width="stretch", key=f"re2_monitor_{order}"):
+            st.session_state["w12_selected_order"] = order
+            st.session_state["page"] = "Monitor Pedidos"
+            try:
+                st.query_params["pedido_wms"] = order
+            except Exception:
+                pass
+            st.rerun()
+
+
+def _render_work_center(
+    ctx: dict,
+    base: pd.DataFrame,
+    selected_code: str | None,
+    start_date,
+    end_date,
+) -> None:
+    render_html(
+        "<div class='re-work-head'><div><b>Mesa comercial</b>"
+        "<span>Ventas, pedidos en proceso, stock y gestiones en un solo lugar</span>"
+        "</div><i>ERP + WMS</i></div>"
+    )
+
+    tab_orders, tab_stock, tab_actions = st.tabs(
+        ["Pedidos en proceso", "Consulta de stock", "Registrar gestión"]
+    )
+
+    # re_orders_toolbar_v2
+    toolbar_left, toolbar_right = st.columns(
+        [4.3, 1.25]
+    )
+
+    with toolbar_left:
+        st.markdown(
+            """
+            <div class="re-orders-toolbar-v2">
+              <div class="re-orders-alert-icon">!</div>
+              <div>
+                <div class="re-orders-toolbar-title">
+                  Pedidos y alertas
+                </div>
+                <div class="re-orders-toolbar-subtitle">
+                  Estado WMS, quiebres y facturación
+                  del ejecutivo seleccionado
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with toolbar_right:
+        st.markdown(
+            "<div style='height:7px'></div>",
+            unsafe_allow_html=True,
+        )
+
+        request_orders = st.button(
+            "Ver pedidos",
+            type="primary",
+            width="stretch",
+            disabled=not bool(selected_code),
+            key="re_request_orders_v2",
+        )
+
+        if request_orders and selected_code:
+            st.session_state[
+                "re_requested_orders_seller"
+            ] = selected_code
+
+    requested_orders_seller = (
+        st.session_state.get(
+            "re_requested_orders_seller"
+        )
+    )
+
+    with tab_orders:
+        if not selected_code:
+            st.markdown(
+                """
+                <div class="re-orders-empty-v2">
+                  <div class="re-orders-empty-kicker">
+                    Consulta bajo demanda
+                  </div>
+                  <div class="re-orders-empty-title">
+                    Selecciona un vendedor
+                  </div>
+                  <div class="re-orders-empty-text">
+                    Selecciona un ejecutivo en los filtros
+                    superiores para consultar sus pedidos,
+                    alertas y estado de facturación.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        elif requested_orders_seller != selected_code:
+            st.markdown(
+                """
+                <div class="re-orders-empty-v2">
+                  <div class="re-orders-empty-kicker">
+                    Vendedor seleccionado
+                  </div>
+                  <div class="re-orders-empty-title">
+                    Presiona Ver pedidos
+                  </div>
+                  <div class="re-orders-empty-text">
+                    El WMS se consultar? solamente cuando
+                    presiones el bot?n. As? evitamos cargas
+                    innecesarias al abrir el Resumen Ejecutivo.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        else:
+            with st.spinner("Consultando Monitor de Pedidos WMS..."):
+                orders, error = _load_commercial_orders(ctx.get("sales_df"), selected_code)
+
+            raw_sales = ctx.get("sales_df")
+            commitments = pd.DataFrame()
+            if raw_sales is not None and not raw_sales.empty:
+                commitments = raw_sales.copy()
+                commitments["_SellerCode"] = commitments.get(
+                    "Vendedor", pd.Series(index=commitments.index, dtype=object)
+                ).map(_seller_key)
+                commitment_dates = pd.to_datetime(commitments.get("Fecha_dt"), errors="coerce")
+                commitments = commitments[
+                    commitments.get("TipoDocto", "").astype(str).str.upper().str.strip().eq("COMPROMISO COMPRA")
+                    & commitment_dates.dt.date.between(start_date, end_date)
+                ].copy()
+                if selected_code:
+                    commitments = commitments[commitments["_SellerCode"].eq(selected_code)].copy()
+
+            commitment_docs = int(commitments["Numero"].nunique()) if "Numero" in commitments else 0
+            commitment_amount = float(
+                pd.to_numeric(commitments.get("VentaMonto_num", 0), errors="coerce").fillna(0).abs().sum()
+            ) if not commitments.empty else 0.0
+            active_orders = len(orders) if not orders.empty else 0
+            attention_orders = int(orders["_quiebre"].fillna(False).astype(bool).sum()) if not orders.empty else 0
+            render_html(
+                "<div class='re-pipeline-grid'>"
+                f"<div><span>Pedidos ingresados</span><b>{commitment_docs:,}</b><small>Compromisos de compra · no son ventas</small></div>"
+                f"<div><span>Valor en pedidos</span><b>{html.escape(format_clp(commitment_amount))}</b><small>Cartera pendiente de facturación</small></div>"
+                f"<div><span>Pedidos activos WMS</span><b>{active_orders:,}</b><small>Actualmente en proceso</small></div>"
+                f"<div class='alert'><span>Requieren atención</span><b>{attention_orders:,}</b><small>Quiebre o revisión operacional</small></div>"
+                "</div>".replace(",", ".")
+            )
+
+            if error and orders.empty:
+                st.info(f"No fue posible mostrar pedidos: {error}")
+            elif orders.empty:
+                st.success("No hay pedidos en proceso para el vendedor seleccionado.")
+            else:
+                s1, s2 = st.columns([3.2, 1.2])
+                with s1:
+                    query = st.text_input(
+                        "Buscar pedido",
+                        placeholder="N° pedido, cliente, RUT u orden de compra...",
+                        key="re_work_order_search",
+                    )
+                with s2:
+                    stages = ["Todas"] + sorted(orders["_stage"].dropna().astype(str).unique())
+                    stage = st.selectbox("Etapa WMS", stages, key="re_work_order_stage")
+
+                filtered = orders.copy()
+                if query.strip():
+                    q = query.strip().lower()
+                    filtered = filtered[filtered["_search"].str.contains(q, regex=False, na=False)]
+                if stage != "Todas":
+                    filtered = filtered[filtered["_stage"].eq(stage)]
+
+                total = len(orders)
+                attention = int(orders["_quiebre"].fillna(False).astype(bool).sum())
+                ready = int(orders["_ready_invoice"].fillna(False).astype(bool).sum())
+                render_html(
+                    "<div class='re-work-summary'>"
+                    f"<span><b>{total}</b> pedidos activos</span>"
+                    f"<span class='warn'><b>{attention}</b> requieren atención</span>"
+                    f"<span class='ok'><b>{ready}</b> listos para facturar</span>"
+                    "</div>"
+                )
+
+                def _invoice_number(row):
+                    candidates = (
+                        row.get("num_factura"),
+                        row.get("d5"),
+                        row.get("numfactura"),
+                    )
+
+                    for value in candidates:
+                        text_value = str(
+                            value or ""
+                        ).strip()
+
+                        if text_value not in {
+                            "",
+                            "0",
+                            "0.0",
+                            "nan",
+                            "None",
+                        }:
+                            digits = "".join(
+                                char
+                                for char in text_value
+                                if char.isdigit()
+                            )
+
+                            if digits:
+                                return digits.zfill(10)
+
+                            return text_value
+
+                    return "?"
+
+
+                def _invoice_status(row):
+                    invoice = _invoice_number(row)
+
+                    if invoice != "?":
+                        return "Facturado"
+
+                    if bool(row.get("_ready_invoice")):
+                        return "Por facturar"
+
+                    return "Pendiente"
+
+
+                invoice_numbers = filtered.apply(
+                    _invoice_number,
+                    axis=1,
+                )
+
+                invoice_status = filtered.apply(
+                    _invoice_status,
+                    axis=1,
+                )
+
+                table = pd.DataFrame(
+                    index=filtered.index
+                )
+
+                table["Pedido"] = (
+                    filtered["ob_oid"]
+                    .fillna("")
+                    .astype(str)
+                )
+
+                table["Cliente"] = (
+                    filtered["bill_name"]
+                    .fillna("?")
+                    .astype(str)
+                )
+
+                table["Vendedor"] = (
+                    filtered["_seller_name"]
+                    .fillna("Sin vendedor asociado")
+                    .astype(str)
+                )
+
+                table["Fecha"] = (
+                    pd.to_datetime(
+                        filtered["_date"],
+                        errors="coerce",
+                    )
+                    .dt.strftime("%d-%m-%Y")
+                    .fillna("?")
+                )
+
+                table["Etapa WMS"] = (
+                    filtered["_stage"]
+                    .fillna("?")
+                    .astype(str)
+                )
+
+                requested = pd.to_numeric(
+                    filtered["ord_qty_total"],
+                    errors="coerce",
+                ).fillna(0)
+
+                completed = pd.to_numeric(
+                    filtered["cmp_qty_total"],
+                    errors="coerce",
+                ).fillna(0)
+
+                table["Avance"] = (
+                    completed
+                    .div(requested.replace(0, pd.NA))
+                    .fillna(0)
+                    .mul(100)
+                    .clip(lower=0, upper=100)
+                    .round()
+                    .astype(int)
+                )
+
+                table["Facturación"] = invoice_status
+
+                table["Nº factura"] = invoice_numbers
+
+                table["Quiebre"] = filtered[
+                    "_quiebre"
+                ].map(
+                    lambda value: (
+                        "Revisar"
+                        if bool(value)
+                        else "Sin alerta"
+                    )
+                )
+
+                st.dataframe(
+                    table.reset_index(drop=True),
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Pedido": st.column_config.TextColumn(
+                            "N? pedido",
+                            width="small",
+                        ),
+                        "Cliente": st.column_config.TextColumn(
+                            "Cliente",
+                            width="large",
+                        ),
+                        "Vendedor": st.column_config.TextColumn(
+                            "Vendedor",
+                            width="medium",
+                        ),
+                        "Etapa WMS": st.column_config.TextColumn(
+                            "Etapa WMS",
+                            width="small",
+                        ),
+                        "Avance": st.column_config.ProgressColumn(
+                            "Avance",
+                            min_value=0,
+                            max_value=100,
+                            format="%d%%",
+                            width="medium",
+                        ),
+                        "Facturación": st.column_config.TextColumn(
+                            "Estado facturación",
+                            width="small",
+                        ),
+                        "Nº factura": st.column_config.TextColumn(
+                            "Nº factura",
+                            width="small",
+                        ),
+                        "Quiebre": st.column_config.TextColumn(
+                            "Alerta",
+                            width="small",
+                        ),
+                    },
+                )
+
+                order_options = (
+                    filtered["ob_oid"]
+                    .dropna()
+                    .astype(str)
+                    .tolist()
+                )
+
+                if order_options:
+                    c1, c2, c3 = st.columns(
+                        [3, 1.15, 1.45]
+                    )
+
+                    with c1:
+                        selected_order = st.selectbox(
+                            "Pedido para revisar",
+                            order_options,
+                            key="re_work_selected_order",
+                        )
+
+                    selected_rows = filtered[
+                        filtered["ob_oid"]
+                        .astype(str)
+                        .eq(str(selected_order))
+                    ]
+
+                    selected_row = (
+                        selected_rows.iloc[0]
+                        if not selected_rows.empty
+                        else None
+                    )
+
+                    with c2:
+                        st.markdown(
+                            "<div style='height:28px'></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        if st.button(
+                            "Ver pedido",
+                            type="primary",
+                            width="stretch",
+                            key="re_view_order_dialog",
+                        ):
+                            if selected_row is not None:
+                                _render_executive_order_dialog_v2(
+                                    selected_row
+                                )
+
+                    with c3:
+                        st.markdown(
+                            "<div style='height:28px'></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        if st.button(
+                            "Abrir en Monitor",
+                            width="stretch",
+                            key="re_open_monitor",
+                        ):
+                            st.session_state[
+                                "w12_selected_order"
+                            ] = selected_order
+
+                            st.session_state[
+                                "page"
+                            ] = "Monitor Pedidos"
+
+                            try:
+                                st.query_params[
+                                    "pedido_wms"
+                                ] = selected_order
+                            except Exception:
+                                pass
+
+                            st.rerun()
+
+    with tab_stock:
+        stock = ctx.get("stock_normalized")
+        if stock is None or stock.empty:
+            st.info("No hay stock WMS disponible en este momento.")
+        else:
+            q = st.text_input(
+                "Buscar SKU o producto",
+                placeholder="Ej.: 1154023 o Pantalón Cargo...",
+                key="re_work_stock_search",
+            )
+            if not q.strip():
+                st.caption("Escribe al menos 2 caracteres para consultar disponibilidad por bodega.")
+            elif len(q.strip()) < 2:
+                st.warning("Ingresa al menos 2 caracteres.")
+            else:
+                text = q.strip().lower()
+                result = stock[
+                    stock["Código"].fillna("").astype(str).str.lower().str.contains(text, regex=False)
+                    | stock["Producto"].fillna("").astype(str).str.lower().str.contains(text, regex=False)
+                ].copy()
+                cols = [c for c in ["Código", "Producto", "Bodega", "Disponible", "Comprometido", "En tránsito"] if c in result.columns]
+                result = result[cols].sort_values([c for c in ["Código", "Bodega"] if c in cols]).head(200)
+                if result.empty:
+                    st.warning("No se encontraron productos para la búsqueda.")
+                else:
+                    st.dataframe(result, hide_index=True, width="stretch")
+                    st.caption("Stock de solo lectura. Fuente: sincronización WMS / Supabase.")
+
+    with tab_actions:
+        st.markdown("#### Registrar actividad comercial")
+        st.caption("Las gestiones se guardan en CRM y quedan asociadas al usuario conectado.")
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            if st.button("Nueva oportunidad", width="stretch", key="re_new_opportunity"):
+                st.session_state["crm_requested_section"] = "Oportunidades"
+                st.session_state["page"] = "CRM"
+                st.rerun()
+        with a2:
+            if st.button("Nuevo seguimiento", width="stretch", key="re_new_followup"):
+                st.session_state["crm_requested_section"] = "Seguimientos"
+                st.session_state["page"] = "CRM"
+                st.rerun()
+        with a3:
+            if st.button("Buscar cliente", width="stretch", key="re_find_client"):
+                st.session_state["crm_requested_section"] = "Clientes"
+                st.session_state["page"] = "CRM"
+                st.rerun()
+
+
+def _client_detail(df, no_vat, client_col, legal_col):
+    """Resumen por cliente con cantidad de documentos y venta neta."""
+    if df.empty:
+        return pd.DataFrame(columns=["Código cliente", "Cliente", "Documentos", "Venta neta"])
+
+    work = df[df["Grupo comercial"].isin(["Factura", "Boleta", "Nota de crédito"])].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["Código cliente", "Cliente", "Documentos", "Venta neta"])
+
+    work["_VentaNeta"] = _signed_amount(work, no_vat)
+
+    group_cols = [c for c in [legal_col, client_col] if c and c in work.columns]
+    if not group_cols:
+        return pd.DataFrame(columns=["Código cliente", "Cliente", "Documentos", "Venta neta"])
+
+    agg = {"_VentaNeta": "sum"}
+    if "Numero" in work.columns:
+        agg["Numero"] = pd.Series.nunique
+
+    out = work.groupby(group_cols, dropna=False).agg(agg).reset_index()
+    out = out.sort_values("_VentaNeta", ascending=False)
+
+    result = pd.DataFrame()
+    result["Código cliente"] = (
+        out[legal_col].fillna("").astype(str)
+        if legal_col and legal_col in out.columns
+        else ""
+    )
+    result["Cliente"] = (
+        out[client_col].fillna("Sin razón social").astype(str)
+        if client_col and client_col in out.columns
+        else "Sin cliente"
+    )
+    result["Documentos"] = out["Numero"].fillna(0).astype(int) if "Numero" in out.columns else 0
+    result["Venta neta"] = out["_VentaNeta"].round(0).astype(float)
+    return result
+
+
+def _credit_detail(df, no_vat, client_col, legal_col):
+    """Una fila por nota de crédito para consulta/búsqueda."""
+    if df.empty:
+        return pd.DataFrame(columns=["Fecha", "Documento", "Código cliente", "Cliente", "Monto NC"])
+
+    work = df[df["Grupo comercial"].eq("Nota de crédito")].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["Fecha", "Documento", "Código cliente", "Cliente", "Monto NC"])
+
+    work["_MontoNC"] = pd.to_numeric(work["VentaMonto_num"], errors="coerce").fillna(0).abs()
+    if no_vat:
+        work["_MontoNC"] = work["_MontoNC"] / (1 + VAT_RATE)
+
+    group_cols = [c for c in ["Fecha_dt", "Numero", "TipoDocto"] if c in work.columns]
+    agg = {"_MontoNC": "sum"}
+    if legal_col and legal_col in work.columns:
+        agg[legal_col] = "first"
+    if client_col and client_col in work.columns:
+        agg[client_col] = "first"
+
+    out = work.groupby(group_cols, dropna=False).agg(agg).reset_index()
+    out = out.sort_values("Fecha_dt", ascending=False)
+
+    result = pd.DataFrame()
+    result["Fecha"] = pd.to_datetime(out["Fecha_dt"], errors="coerce").dt.strftime("%d-%m-%Y")
+    result["Documento"] = out["Numero"].fillna("").astype(str) if "Numero" in out.columns else ""
+    result["Código cliente"] = (
+        out[legal_col].fillna("").astype(str)
+        if legal_col and legal_col in out.columns
+        else ""
+    )
+    result["Cliente"] = (
+        out[client_col].fillna("").astype(str)
+        if client_col and client_col in out.columns
+        else ""
+    )
+    result["Monto NC"] = out["_MontoNC"].round(0).astype(float)
+    return result
+
+
+def _search_table(df, query):
+    """Búsqueda libre en todas las columnas visibles."""
+    if df.empty or not str(query or "").strip():
+        return df
+
+    q = str(query).strip().lower()
+    mask = pd.Series(False, index=df.index)
+    for col in df.columns:
+        mask = mask | df[col].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+    return df[mask].copy()
+
+
+def _latest_sales(df, no_vat, client_col):
+    if df.empty:
+        return pd.DataFrame(columns=["Fecha", "Documento", "Tipo", "Cliente", "Monto Bruto", "Notas de Crédito", "Venta Neta"])
+
+    work = df.copy()
+    work["_MontoAbs"] = pd.to_numeric(work["VentaMonto_num"], errors="coerce").fillna(0).abs()
+    if no_vat:
+        work["_MontoAbs"] = work["_MontoAbs"] / (1 + VAT_RATE)
+
+    work["_VentaNeta"] = _signed_amount(work, no_vat)
+    work["_Bruto"] = work["_MontoAbs"].where(work["Grupo comercial"].isin(["Factura", "Boleta"]), 0)
+    work["_NC"] = work["_MontoAbs"].where(work["Grupo comercial"].eq("Nota de crédito"), 0)
+
+    # Una fila por documento para evitar duplicación visual por líneas de detalle.
+    group_cols = [c for c in ["Fecha_dt", "Numero", "TipoDocto", "Grupo comercial"] if c in work.columns]
+    agg = {"_Bruto": "sum", "_NC": "sum", "_VentaNeta": "sum"}
+    if client_col and client_col in work.columns:
+        agg[client_col] = "first"
+
+    out = work.groupby(group_cols, dropna=False).agg(agg).reset_index()
+    out = out.sort_values("Fecha_dt", ascending=False).head(8)
+
+    result = pd.DataFrame()
+    result["Fecha"] = out["Fecha_dt"].dt.strftime("%d/%m/%Y")
+    result["Documento"] = out["Numero"].astype(str) if "Numero" in out.columns else ""
+    result["Tipo"] = out["Grupo comercial"].astype(str)
+    result["Cliente"] = out[client_col].fillna("").astype(str) if client_col and client_col in out.columns else ""
+    result["Monto Bruto"] = out["_Bruto"]
+    result["Notas de Crédito"] = out["_NC"]
+    result["Venta Neta"] = out["_VentaNeta"]
+    return result
+
+
+def render(ctx):
+    st.markdown(
+        """
+        <style>
+        .block-container{
+            max-width:1600px;
+            padding-top:1.25rem;
+            padding-bottom:2rem;
+        }
+
+        /* Cabecera */
+        .re-head{
+            display:flex;
+            justify-content:space-between;
+            align-items:flex-start;
+            gap:18px;
+            margin-bottom:8px;
+        }
+        .re-title{
+            font-size:31px;
+            font-weight:900;
+            letter-spacing:-.035em;
+            color:#101218;
+            line-height:1.05;
+        }
+        .re-sub{
+            margin-top:7px;
+            color:#374151;
+            font-size:13px;
+            font-weight:600;
+        }
+
+        /* Barra informativa */
+        .re-info{
+            background:#fff;
+            border:1px solid #e6e9ef;
+            border-radius:10px;
+            padding:10px 14px;
+            color:#4b5563;
+            font-size:11px;
+            margin:10px 0 12px;
+            box-shadow:0 2px 10px rgba(17,24,39,.025);
+        }
+
+        /* Ajustes de controles */
+        div[data-testid="stSelectbox"] label,
+        div[data-testid="stDateInput"] label,
+        div[data-testid="stNumberInput"] label,
+        div[data-testid="stMultiSelect"] label{
+            color:#262b34 !important;
+            font-size:11px !important;
+            font-weight:700 !important;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-testid="stDateInput"] input,
+        div[data-testid="stNumberInput"] input{
+            min-height:45px;
+            border-radius:9px !important;
+        }
+        div[data-testid="stDownloadButton"] button,
+        div[data-testid="stButton"] button{
+            min-height:45px;
+            border-radius:9px;
+            border:1px solid #d7dce4;
+            background:#fff;
+            color:#111827;
+            font-weight:700;
+        }
+
+        /* KPI */
+        .re-kpi-grid{
+            display:grid;
+            grid-template-columns:repeat(5,minmax(0,1fr));
+            gap:12px;
+            margin:12px 0;
+        }
+        .re-kpi{
+            background:#fff;
+            border:1px solid #e3e7ed;
+            border-radius:12px;
+            padding:17px 17px 13px;
+            min-height:120px;
+            box-shadow:0 3px 14px rgba(17,24,39,.035);
+        }
+        .re-kpi-top{
+            display:flex;
+            gap:13px;
+            align-items:center;
+        }
+        .re-icon{
+            width:44px;
+            height:44px;
+            min-width:44px;
+            border-radius:50%;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:21px;
+            font-weight:900;
+        }
+        .re-icon.green{background:#edf8ef;color:#14912c;}
+        .re-icon.blue{background:#eef4ff;color:#2266dc;}
+        .re-icon.purple{background:#f3efff;color:#7440d8;}
+        .re-icon.yellow{background:#fff8e6;color:#efad00;}
+        .re-icon.red{background:#fff0f0;color:#de2f2f;}
+        .re-kpi-copy{min-width:0;}
+        .re-kpi-label{
+            color:#344054;
+            font-size:10px;
+            font-weight:800;
+            text-transform:uppercase;
+            letter-spacing:.02em;
+        }
+        .re-kpi-value{
+            color:#101218;
+            font-size:23px;
+            line-height:1.15;
+            font-weight:900;
+            margin-top:7px;
+            white-space:nowrap;
+        }
+        .re-kpi-foot{
+            display:flex;
+            justify-content:flex-end;
+            gap:8px;
+            align-items:center;
+            margin-top:12px;
+            font-size:9.5px;
+            color:#667085;
+        }
+        .trend-up{color:#159447;}
+        .trend-down{color:#d92d20;}
+
+        /* Botones de consulta bajo KPIs */
+        .st-key-re_open_docs button,
+        .st-key-re_open_clients button,
+        .st-key-re_open_nc button{
+            min-height:34px !important;
+            height:34px !important;
+            border-radius:8px !important;
+            font-size:11px !important;
+            font-weight:750 !important;
+            box-shadow:none !important;
+            margin-top:-5px !important;
+        }
+        .st-key-re_open_docs button{
+            background:#f4f7ff !important;
+            border-color:#dbe5ff !important;
+            color:#225fc8 !important;
+        }
+        .st-key-re_open_clients button{
+            background:#f7f4ff !important;
+            border-color:#e5dcff !important;
+            color:#6840bd !important;
+        }
+        .st-key-re_open_nc button{
+            background:#fff5f5 !important;
+            border-color:#ffdada !important;
+            color:#c92a2a !important;
+        }
+        .re-detail-summary{
+            display:flex;
+            gap:10px;
+            flex-wrap:wrap;
+            margin:4px 0 10px;
+        }
+        .re-detail-pill{
+            background:#f7f8fa;
+            border:1px solid #e5e8ee;
+            border-radius:999px;
+            padding:5px 10px;
+            color:#475467;
+            font-size:10px;
+            font-weight:700;
+        }
+
+        /* Tarjetas de sección */
+        .re-card-title{
+            color:#151820;
+            font-size:13px;
+            font-weight:850;
+            margin-bottom:6px;
+        }
+        .re-card-sub{
+            color:#667085;
+            font-size:10px;
+            margin-bottom:8px;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]{
+            border-color:#e3e7ed !important;
+            border-radius:12px !important;
+            box-shadow:0 3px 14px rgba(17,24,39,.025);
+            background:#fff;
+        }
+
+        /* Tabla top clientes en HTML */
+        .re-client-head, .re-client-row{
+            display:grid;
+            grid-template-columns:34px 1fr auto;
+            gap:8px;
+            align-items:center;
+        }
+        .re-client-head{
+            color:#667085;
+            font-size:9.5px;
+            padding:7px 4px;
+            border-bottom:1px solid #e9edf2;
+        }
+        .re-client-row{
+            padding:10px 4px;
+            border-bottom:1px solid #edf0f4;
+            font-size:10.5px;
+            color:#20242c;
+        }
+        .re-client-row:last-child{border-bottom:none;}
+        .re-client-rank{color:#475467;}
+        .re-client-name{
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+        }
+        .re-client-value{font-weight:800;}
+
+        /* Ranking */
+        .re-rank-head, .re-rank-row{
+            display:grid;
+            grid-template-columns:32px 1.5fr .8fr .65fr;
+            gap:8px;
+            align-items:center;
+        }
+        .re-rank-head{
+            padding:7px 8px;
+            color:#667085;
+            font-size:9.5px;
+            border-bottom:1px solid #e9edf2;
+        }
+        .re-rank-row{
+            padding:10px 8px;
+            border-bottom:1px solid #edf0f4;
+            font-size:10.5px;
+        }
+        .re-rank-row.current{
+            background:#fff8dc;
+            border-radius:6px;
+        }
+        .re-rank-name{font-weight:700;}
+        .re-rank-value{text-align:right;}
+        .re-rank-var{text-align:right;font-weight:800;}
+        .re-rank-var.up{color:#159447;}
+        .re-rank-var.down{color:#d92d20;}
+
+        /* Meta */
+        .re-goal{
+            display:grid;
+            grid-template-columns:1.15fr 1fr .8fr;
+            gap:24px;
+            align-items:center;
+            background:#fff;
+            border:1px solid #e3e7ed;
+            border-radius:12px;
+            padding:15px 18px;
+            margin-top:12px;
+            box-shadow:0 3px 14px rgba(17,24,39,.025);
+        }
+        .re-goal-title{
+            font-size:11px;
+            color:#3b4250;
+        }
+        .re-goal-title strong{
+            color:#111827;
+            font-weight:850;
+        }
+        .re-goal-track{
+            height:9px;
+            background:#edf0f4;
+            border-radius:999px;
+            overflow:hidden;
+        }
+        .re-goal-fill{
+            height:100%;
+            background:#f7b500;
+            border-radius:999px;
+        }
+        .re-goal-pct{
+            font-size:11px;
+            font-weight:850;
+            margin-top:6px;
+        }
+        .re-projection{
+            text-align:right;
+            color:#475467;
+            font-size:11px;
+        }
+        .re-projection strong{color:#14823b;}
+
+        div[data-testid="stDataFrame"]{
+            border:1px solid #e7eaf0;
+            border-radius:9px;
+            overflow:hidden;
+        }
+
+        @media(max-width:1200px){
+            .re-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+            .re-goal{grid-template-columns:1fr;}
+            .re-projection{text-align:left;}
+        }
+        
+        /* MARITEX · Resumen Ejecutivo · Visual Master V2 */
+        .re-kpi{
+            background:rgba(255,255,255,.97) !important;
+            border-color:#cfd6dd !important;
+            box-shadow:0 8px 24px rgba(28,38,48,.055) !important;
+        }
+        .re-card,
+        .re-panel{
+            background:rgba(255,255,255,.97) !important;
+            border-color:#cfd6dd !important;
+            box-shadow:0 8px 24px rgba(28,38,48,.05) !important;
+        }
+        .re-title{color:#0d1319 !important;}
+
+        /* La sección comercial final queda deliberadamente oscura */
+        .re-goal-master-dark{
+            margin-top:20px;
+            padding:22px 22px 18px;
+            border-radius:14px;
+            background:
+                radial-gradient(circle at 85% 0%,rgba(255,196,0,.06),rgba(255,196,0,0) 32%),
+                linear-gradient(135deg,#202832 0%,#111820 100%);
+            border:1px solid #313b46;
+            color:#f7f8fa;
+            box-shadow:0 12px 28px rgba(15,22,29,.13);
+        }
+        .re-goal-master-dark h1,
+        .re-goal-master-dark h2,
+        .re-goal-master-dark h3,
+        .re-goal-master-dark strong{color:#fff !important;}
+        .re-goal-master-dark p,
+        .re-goal-master-dark span,
+        .re-goal-master-dark small{color:#b8c1ca !important;}
+
+
+        /* =========================================================
+           MARITEX · RESUMEN EJECUTIVO · ERP V2 ESTRUCTURAL
+           ========================================================= */
+        [data-testid="stMainBlockContainer"]{
+            max-width:1720px!important;
+            padding:14px 18px 28px!important;
+        }
+
+        .re-head{
+            display:flex!important;
+            align-items:center!important;
+            justify-content:space-between!important;
+            padding:8px 0 16px!important;
+            margin-bottom:12px!important;
+            border-bottom:1px solid #202a31!important;
+        }
+        .re-title{
+            color:#fff!important;
+            font-size:2.15rem!important;
+            font-weight:900!important;
+            letter-spacing:-.045em!important;
+        }
+        .re-sub{
+            color:#89a9bd!important;
+            font-size:.86rem!important;
+            font-weight:500!important;
+        }
+        .re-status-pill{
+            display:inline-flex;
+            align-items:center;
+            gap:8px;
+            border:1px solid rgba(255,196,0,.35);
+            background:#0b0f12;
+            border-radius:999px;
+            padding:8px 12px;
+            color:#eef3f6;
+            font-size:.72rem;
+            font-weight:800;
+        }
+        .re-status-pill i{
+            width:8px;height:8px;border-radius:50%;
+            background:#ffc400;
+            box-shadow:0 0 0 4px rgba(255,196,0,.09);
+        }
+
+        .re-filter-shell{
+            background:linear-gradient(180deg,#0a1015,#080d11);
+            border:1px solid #26323b;
+            border-radius:12px;
+            padding:12px 12px 4px;
+            margin-bottom:10px;
+        }
+        .re-filter-title{
+            color:#fff;
+            font-size:.8rem;
+            font-weight:850;
+            margin-bottom:8px;
+        }
+
+        div[data-testid="stSelectbox"] label,
+        div[data-testid="stDateInput"] label,
+        div[data-testid="stNumberInput"] label,
+        div[data-testid="stMultiSelect"] label,
+        div[data-testid="stToggle"] label{
+            color:#aebbc5!important;
+            font-size:.69rem!important;
+            font-weight:800!important;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-testid="stDateInput"] input,
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stTextInput"] input{
+            min-height:42px!important;
+            background:#0c141b!important;
+            color:#f4f7f9!important;
+            border:1px solid #2a3741!important;
+            border-radius:9px!important;
+        }
+
+        div[data-testid="stDownloadButton"] button,
+        div[data-testid="stButton"] button{
+            min-height:42px!important;
+            background:#0b1218!important;
+            color:#eef3f6!important;
+            border:1px solid #2a3741!important;
+            border-radius:9px!important;
+            box-shadow:none!important;
+            font-weight:800!important;
+        }
+        div[data-testid="stDownloadButton"] button:hover,
+        div[data-testid="stButton"] button:hover{
+            border-color:#ffc400!important;
+            color:#ffc400!important;
+        }
+
+        .re-info{
+            background:#0a1117!important;
+            border:1px solid #26323b!important;
+            color:#92a2ad!important;
+            box-shadow:none!important;
+            margin:10px 0 12px!important;
+        }
+        .re-info strong{color:#ffc400!important;}
+
+        .re-kpi-grid{
+            grid-template-columns:repeat(5,minmax(0,1fr))!important;
+            gap:10px!important;
+            margin:12px 0 8px!important;
+        }
+        .re-kpi{
+            position:relative;
+            min-height:118px!important;
+            padding:15px 15px 12px!important;
+            border-radius:12px!important;
+            border:1px solid #2a3640!important;
+            box-shadow:0 10px 28px rgba(0,0,0,.16)!important;
+            overflow:hidden;
+        }
+        .re-kpi:nth-child(1){background:linear-gradient(145deg,#123421,#0b2117)!important;}
+        .re-kpi:nth-child(2){background:linear-gradient(145deg,#173555,#10263e)!important;}
+        .re-kpi:nth-child(3){background:linear-gradient(145deg,#31234d,#211936)!important;}
+        .re-kpi:nth-child(4){background:linear-gradient(145deg,#3a3415,#24200e)!important;}
+        .re-kpi:nth-child(5){background:linear-gradient(145deg,#3a2023,#28171a)!important;}
+        .re-kpi:before{
+            content:"";
+            position:absolute;
+            inset:0 auto 0 0;
+            width:3px;
+            background:#ffc400;
+        }
+        .re-kpi-label{
+            color:#d0d9df!important;
+            font-size:.67rem!important;
+        }
+        .re-kpi-value{
+            color:#fff!important;
+            font-size:1.55rem!important;
+            margin-top:5px!important;
+        }
+        .re-kpi-foot{
+            color:#93a0aa!important;
+            font-size:.64rem!important;
+            margin-top:10px!important;
+        }
+        .re-icon{
+            width:38px!important;
+            height:38px!important;
+            min-width:38px!important;
+            border-radius:9px!important;
+            border:1px solid rgba(255,255,255,.08)!important;
+        }
+
+        .re-section-shell{
+            border:1px solid #26323b;
+            border-radius:12px;
+            background:linear-gradient(180deg,#091016,#070c10);
+            padding:14px;
+        }
+        .re-section-head{
+            display:flex;
+            justify-content:space-between;
+            align-items:flex-start;
+            gap:12px;
+            margin-bottom:10px;
+        }
+        .re-section-title{
+            color:#fff;
+            font-weight:900;
+            font-size:.9rem;
+        }
+        .re-section-sub{
+            color:#84939e;
+            font-size:.67rem;
+            margin-top:3px;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"]{
+            border:1px solid #26323b!important;
+            border-radius:12px!important;
+            background:linear-gradient(180deg,#091016,#070c10)!important;
+            box-shadow:none!important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] > div{background:transparent!important;}
+        .re-card-title{color:#fff!important;font-size:.82rem!important;font-weight:900!important;}
+        .re-card-sub{color:#84939e!important;font-size:.67rem!important;}
+
+        .re-client-head,.re-rank-head{
+            color:#84939e!important;
+            border-bottom-color:#26323b!important;
+        }
+        .re-client-row,.re-rank-row{
+            color:#e2e8ec!important;
+            border-bottom-color:#202a31!important;
+        }
+        .re-client-value,.re-rank-name{color:#fff!important;}
+        .re-rank-row.current{
+            background:rgba(255,196,0,.10)!important;
+            border:1px solid rgba(255,196,0,.18)!important;
+        }
+
+        .re-goal-master-dark{
+            background:
+                radial-gradient(circle at 86% 0%,rgba(255,196,0,.055),transparent 30%),
+                linear-gradient(135deg,#111920 0%,#091016 100%)!important;
+            border-color:#2a3640!important;
+            box-shadow:none!important;
+        }
+
+        div[data-testid="stDataFrame"]{
+            border:1px solid #26323b!important;
+            border-radius:10px!important;
+            overflow:hidden!important;
+            background:#091016!important;
+            --gdg-bg-cell:#0b1218;
+            --gdg-bg-header:#091016;
+            --gdg-text-dark:#f4f7f9;
+            --gdg-border-color:#26323b;
+        }
+        div[data-testid="stDataFrame"] > div,
+        div[data-testid="stDataFrame"] canvas{background:#0b1218!important;}
+
+        .re-detail-pill{
+            background:#101820!important;
+            border-color:#2a3640!important;
+            color:#b7c3cc!important;
+        }
+
+        .re-goal{
+            background:#091016!important;
+            border-color:#26323b!important;
+            box-shadow:none!important;
+        }
+        .re-goal-title{color:#9ba9b4!important;}
+        .re-goal-title strong{color:#fff!important;}
+        .re-goal-track{background:#1a242c!important;}
+        .re-goal-fill{background:#ffc400!important;}
+        .re-goal-pct{color:#fff!important;}
+        .re-projection{color:#9ba9b4!important;}
+        .re-projection strong{color:#35d889!important;}
+
+        h1,h2,h3,h4,h5{color:#fff!important;}
+        .stCaption,p,small{color:#8d9ba6;}
+
+        /* =========================================================
+           V3 · PANELES CENTRALES E INFERIORES TIPO INTEGRACIÓN ERP
+           ========================================================= */
+        .re-panel-head{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:12px;
+            margin-bottom:10px;
+        }
+        .re-panel-title{
+            color:#fff;
+            font-size:.84rem;
+            font-weight:900;
+            letter-spacing:-.01em;
+        }
+        .re-panel-sub{
+            margin-top:3px;
+            color:#7f909c;
+            font-size:.66rem;
+        }
+        .re-panel-chip{
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            padding:5px 8px;
+            border:1px solid #2a3640;
+            border-radius:999px;
+            background:#0c141b;
+            color:#aab8c2;
+            font-size:.63rem;
+            font-weight:800;
+            white-space:nowrap;
+        }
+        .re-panel-chip.yellow{
+            color:#ffc400;
+            border-color:rgba(255,196,0,.28);
+            background:rgba(255,196,0,.06);
+        }
+
+        .re-doc-breakdown{
+            display:grid;
+            gap:7px;
+            margin-top:4px;
+        }
+        .re-doc-row{
+            display:grid;
+            grid-template-columns:10px 1fr auto auto;
+            gap:8px;
+            align-items:center;
+            padding:7px 8px;
+            border:1px solid #202c34;
+            border-radius:8px;
+            background:#0a1218;
+            color:#dfe6eb;
+            font-size:.66rem;
+        }
+        .re-doc-dot{
+            width:8px;height:8px;border-radius:50%;
+        }
+        .re-doc-name{font-weight:800;color:#eaf0f4}
+        .re-doc-value{font-weight:850;color:#fff}
+        .re-doc-pct{color:#8998a3;min-width:42px;text-align:right}
+        .re-net-formula{
+            margin-top:8px;
+            padding:8px 10px;
+            border:1px solid rgba(255,196,0,.18);
+            border-radius:8px;
+            background:rgba(255,196,0,.055);
+            color:#c8d2d9;
+            font-size:.64rem;
+        }
+        .re-net-formula strong{color:#ffc400}
+
+        .re-client-head{
+            grid-template-columns:34px 1fr 100px!important;
+        }
+        .re-client-row{
+            grid-template-columns:34px 1fr 100px!important;
+            position:relative;
+            padding:9px 4px!important;
+        }
+        .re-client-rank{
+            display:flex;
+            width:24px;height:24px;
+            align-items:center;justify-content:center;
+            border-radius:7px;
+            background:#101922;
+            border:1px solid #293640;
+            color:#ffc400!important;
+            font-weight:900;
+        }
+        .re-client-value{
+            text-align:right;
+            font-weight:900!important;
+        }
+        .re-client-bar{
+            grid-column:2 / 4;
+            height:3px;
+            background:#172129;
+            border-radius:999px;
+            overflow:hidden;
+            margin-top:1px;
+        }
+        .re-client-bar > i{
+            display:block;
+            height:100%;
+            background:#ffc400;
+            border-radius:999px;
+        }
+
+        .re-sales-table{
+            border:1px solid #26323b;
+            border-radius:9px;
+            overflow:hidden;
+            background:#091118;
+        }
+        .re-sales-head,
+        .re-sales-row{
+            display:grid;
+            grid-template-columns:.82fr .95fr .75fr 1.75fr .95fr 1fr 1fr;
+            align-items:center;
+        }
+        .re-sales-head{
+            background:#0c141b;
+            color:#8fa0ac;
+            font-size:.61rem;
+            font-weight:850;
+            text-transform:uppercase;
+            border-bottom:1px solid #293640;
+        }
+        .re-sales-row{
+            min-height:38px;
+            color:#e7edf1;
+            font-size:.65rem;
+            border-bottom:1px solid #202b33;
+        }
+        .re-sales-row:last-child{border-bottom:0}
+        .re-sales-row:hover{background:#0d171f}
+        .re-sales-head > div,
+        .re-sales-row > div{
+            padding:8px 8px;
+            overflow:hidden;
+            white-space:nowrap;
+            text-overflow:ellipsis;
+            border-right:1px solid #202b33;
+        }
+        .re-sales-head > div:last-child,
+        .re-sales-row > div:last-child{border-right:0}
+        .re-money{text-align:right;font-weight:850;color:#fff}
+        .re-money.nc{color:#ff777f}
+        .re-sale-type{
+            display:inline-flex;
+            padding:3px 7px;
+            border-radius:999px;
+            background:#15212a;
+            color:#c9d4dc;
+            font-size:.60rem;
+            font-weight:800;
+        }
+
+        .re-rank-head{
+            grid-template-columns:34px 1.45fr .8fr .7fr!important;
+        }
+        .re-rank-row{
+            grid-template-columns:34px 1.45fr .8fr .7fr!important;
+            position:relative;
+            padding:9px 8px!important;
+        }
+        .re-rank-pos{
+            display:flex;
+            width:24px;height:24px;
+            align-items:center;justify-content:center;
+            border-radius:7px;
+            background:#101922;
+            border:1px solid #293640;
+            color:#ffc400;
+            font-weight:900;
+        }
+        .re-rank-bar{
+            grid-column:2 / 5;
+            height:3px;
+            background:#172129;
+            border-radius:999px;
+            overflow:hidden;
+            margin-top:2px;
+        }
+        .re-rank-bar > i{
+            display:block;
+            height:100%;
+            background:linear-gradient(90deg,#ffc400,#e0a900);
+            border-radius:999px;
+        }
+        .re-rank-var{
+            display:inline-flex;
+            justify-content:flex-end;
+            align-items:center;
+            gap:4px;
+        }
+        .re-rank-var.up{color:#35d889!important}
+        .re-rank-var.down{color:#ff6672!important}
+
+        /* Mesa comercial */
+        .re-work-head{display:flex;justify-content:space-between;align-items:center;
+            gap:16px;margin:20px 0 10px;padding:14px 16px;border:1px solid #314755;
+            border-left:4px solid #ffc400;border-radius:11px;background:#0b1720;color:#f8fafc}
+        .re-work-head b{display:block;font-size:16px}.re-work-head span{display:block;
+            margin-top:3px;color:#91a7b5;font-size:11px}.re-work-head i{font-style:normal;
+            padding:6px 10px;border:1px solid #146c4a;border-radius:999px;color:#4ee09b;
+            background:#08281d;font-size:10px;font-weight:800}
+        .re-work-summary{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}
+        .re-work-summary span{padding:7px 10px;border:1px solid #314755;border-radius:999px;
+            background:#0b1720;color:#b9c9d2;font-size:10px}.re-work-summary b{color:#fff}
+        .re-work-summary .warn{border-color:#725d12;color:#ffdc51}
+        .re-work-summary .ok{border-color:#146c4a;color:#4ee09b}
+        .re-pipeline-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:10px;margin:8px 0 14px}.re-pipeline-grid>div{padding:13px 14px;
+            border:1px solid #294351;border-radius:11px;background:#0b1720}
+        .re-pipeline-grid span,.re-pipeline-grid small{display:block}.re-pipeline-grid span{
+            color:#8fa6b4;font-size:9px;font-weight:800;text-transform:uppercase}
+        .re-pipeline-grid b{display:block;margin:5px 0;color:#fff;font-size:20px}
+        .re-pipeline-grid small{color:#6f8795;font-size:9px}.re-pipeline-grid .alert{
+            border-color:#6e3038}.re-pipeline-grid .alert b{color:#ff7280}
+        @media(max-width:900px){.re-pipeline-grid{grid-template-columns:repeat(2,1fr)}}
+        
+        .re-orders-toolbar-v2{
+            min-height:58px;
+            display:flex;
+            align-items:center;
+            gap:12px;
+            padding:7px 3px;
+        }
+
+        .re-orders-alert-icon{
+            width:40px;
+            height:40px;
+            flex:0 0 40px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border-radius:12px;
+            color:#ffc400;
+            background:rgba(255,196,0,.12);
+            border:1px solid rgba(255,196,0,.38);
+            font-size:20px;
+            font-weight:950;
+        }
+
+        .re-orders-toolbar-title{
+            color:#ffffff;
+            font-size:16px;
+            font-weight:850;
+        }
+
+        .re-orders-toolbar-subtitle{
+            color:#7792a2;
+            font-size:11px;
+            line-height:1.4;
+            margin-top:2px;
+        }
+
+        .re-orders-empty-v2{
+            min-height:150px;
+            display:flex;
+            flex-direction:column;
+            justify-content:center;
+            align-items:center;
+            text-align:center;
+            border:1px dashed #385263;
+            border-radius:15px;
+            background:
+                radial-gradient(
+                    circle at 50% 0%,
+                    rgba(35,81,105,.15),
+                    transparent 55%
+                ),
+                #081721;
+            padding:24px;
+            margin-top:9px;
+        }
+
+        .re-orders-empty-kicker{
+            color:#ffc400;
+            font-size:10px;
+            font-weight:850;
+            text-transform:uppercase;
+            letter-spacing:.09em;
+        }
+
+        .re-orders-empty-title{
+            color:#ffffff;
+            font-size:20px;
+            font-weight:850;
+            margin-top:7px;
+        }
+
+        .re-orders-empty-text{
+            max-width:540px;
+            color:#849ba9;
+            font-size:12px;
+            line-height:1.55;
+            margin-top:7px;
+        }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    df = ctx.get("sales_df")
+
+    page_header(
+        title="RESUMEN EJECUTIVO",
+        subtitle=(
+            "Desempeño comercial, clientes, documentos "
+            "y vendedores."
+        ),
+        status="ERP Ventas conectado",
+    )
+
+    if df is None or df.empty:
+        st.info("Carga ERP Ventas desde Plantillas para visualizar el desempeño comercial.")
+        return
+
+    required = {"Grupo comercial", "Fecha_dt", "VentaMonto_num"}
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Faltan columnas requeridas en ERP Ventas: {', '.join(missing)}")
+        return
+
+    # Base comercial oficial compartida con Dashboard.
+    base = prepare_commercial_base(
+        df
+    )
+
+    if base.empty:
+        st.warning("No hay ventas asociadas a los vendedores/canales configurados.")
+        return
+
+    auth_user = st.session_state.get("auth_user") or {}
+    auth_role = str(auth_user.get("role") or "consulta").strip().lower()
+    assigned_seller = _current_seller_code()
+    if auth_role == "comercial" and not assigned_seller:
+        st.warning(
+            "Tu cuenta comercial todavía no tiene un vendedor ERP asociado. "
+            "Solicita al administrador asignarlo desde Usuarios."
+        )
+        return
+
+    legal_col = _find_column(
+        base.columns,
+        ["CodigoLegal", "Código legal", "Codigo legal", "RUT cliente", "Rut cliente", "RUT", "Rut"],
+    )
+    client_col = _find_column(
+        base.columns,
+        ["RazonSocial", "Razón social", "Razon social", "Nombre cliente", "Nombre Cliente"],
+    )
+    if legal_col and client_col and legal_col == client_col:
+        legal_col = None
+
+    # Mes por defecto: el más reciente disponible.
+    months = available_months(base, "Fecha_dt")
+    if not months:
+        st.warning("No hay fechas válidas en ERP Ventas.")
+        return
+
+    month_labels = [month_label_es(m) for m in months]
+    month_map = dict(zip(month_labels, months))
+
+    present_codes = set(base["_VendedorCodigo"].dropna().astype(str))
+    seller_options = [
+        (group, code, name)
+        for code, (name, group) in SELLER_CATALOG.items()
+        if code in present_codes
+    ]
+
+    # ------------------------- filtros superiores -------------------------
+    render_html("<div class='re-filter-shell'><div class='re-filter-title'>Filtros comerciales</div>")
+    f1, f2, f3, f4 = st.columns([1.35, 1.35, 1.0, .72], gap="small")
+
+    with f1:
+        group_options = (
+            [SELLER_CATALOG[assigned_seller][1]]
+            if assigned_seller
+            else ["Todos", "Vendedores", "Ecommerce / Marketplace"]
+        )
+        seller_group = st.selectbox(
+            "Tipo",
+            group_options,
+            key="re_group_v900",
+            disabled=bool(assigned_seller),
+        )
+        scoped = [
+            (g, c, n) for g, c, n in seller_options
+            if seller_group == "Todos" or g == seller_group
+        ]
+        if assigned_seller:
+            assigned_name, assigned_group = SELLER_CATALOG[assigned_seller]
+            scoped = [(assigned_group, assigned_seller, assigned_name)]
+        seller_labels = [f"{c} · {n}" for _, c, n in scoped]
+        selected_label = st.selectbox(
+            "Vendedor",
+            seller_labels if assigned_seller else ["Todos"] + seller_labels,
+            key="re_seller_v900",
+            disabled=bool(assigned_seller),
+        )
+
+    with f2:
+        month_label = st.selectbox(
+            "Mes base",
+            month_labels,
+            index=0,
+            key="re_month_v900",
+        )
+        selected_month = month_map[month_label]
+        month_start, month_end = month_bounds(selected_month)
+
+        month_rows = base[
+            (base["Fecha_dt"].dt.date >= month_start)
+            & (base["Fecha_dt"].dt.date <= month_end)
+        ]
+        max_real = month_rows["Fecha_dt"].max().date() if not month_rows.empty else month_end
+        default_end = min(month_end, max_real)
+
+        # El período debe representar el mes calendario completo seleccionado,
+        # aunque el ERP no tenga movimientos en los primeros o últimos días.
+        # Ej.: agosto siempre debe permitir 01/08 al 31/08 aunque la primera
+        # venta disponible sea del 03/08.
+        period_value = st.date_input(
+            "Período",
+            value=(month_start, month_end),
+            min_value=month_start,
+            max_value=month_end,
+            key="re_period_v960",
+        )
+
+    with f3:
+        compare_previous = st.toggle(
+            "Comparar período anterior",
+            value=True,
+            key="re_compare_v900",
+        )
+        no_vat = st.selectbox(
+            "Base",
+            ["Con IVA", "Sin IVA"],
+            key="re_base_v900",
+        ) == "Sin IVA"
+
+    start_date, end_date = _safe_period(period_value, month_start, default_end)
+
+    selected_code = None
+    if selected_label != "Todos":
+        selected_code = selected_label.split(" · ", 1)[0]
+    if assigned_seller:
+        selected_code = assigned_seller
+
+    current = filter_commercial_view(
+        base,
+        start_date,
+        end_date,
+        seller_group=seller_group,
+        seller_code=selected_code,
+    )
+
+    prev_start, prev_end = _previous_period(
+        start_date,
+        end_date,
+    )
+
+    previous = filter_commercial_view(
+        base,
+        prev_start,
+        prev_end,
+        seller_group=seller_group,
+        seller_code=selected_code,
+    )
+
+    # Exportación respeta todos los filtros.
+    with f4:
+        st.markdown("<div style='height:17px'></div>", unsafe_allow_html=True)
+        export_df = current.copy()
+        csv = export_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⇩ Exportar",
+            data=csv,
+            file_name=f"resumen_ventas_{start_date}_{end_date}.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+    render_html("</div>")
+
+    render_html(
+        "<div class='re-info'>ⓘ Los valores de venta neta consideran: "
+        "<strong>Facturas + Boletas − Notas de crédito.</strong></div>"
+    )
+
+    cur = commercial_metrics(
+        current,
+        no_vat=no_vat,
+        client_col=client_col,
+    )
+    prv = commercial_metrics(
+        previous,
+        no_vat=no_vat,
+        client_col=client_col,
+    )
+
+    var_net = _pct_change(cur["net"], prv["net"]) if compare_previous else 0
+    var_docs = _pct_change(cur["docs"], prv["docs"]) if compare_previous else 0
+    var_clients = _pct_change(cur["clients"], prv["clients"]) if compare_previous else 0
+    var_ticket = _pct_change(cur["ticket"], prv["ticket"]) if compare_previous else 0
+    var_nc = _pct_change(cur["credits"], prv["credits"]) if compare_previous else 0
+
+    kpis = "".join(
+        [
+            _kpi_card("$", "Venta neta", format_clp(cur["net"]), var_net, "green"),
+            _kpi_card("▤", "Documentos", f'{cur["docs"]:,}'.replace(",", "."), var_docs, "blue"),
+            _kpi_card("♙", "Clientes atendidos", f'{cur["clients"]:,}'.replace(",", "."), var_clients, "purple"),
+            _kpi_card("▱", "Ticket promedio", format_clp(cur["ticket"]), var_ticket, "yellow"),
+            _kpi_card("↶", "Notas de crédito", format_clp(cur["credits"]), var_nc, "red", invert=True),
+        ]
+    )
+    render_html(f"<div class='re-kpi-grid'>{kpis}</div>")
+
+    _render_work_center(ctx, base, selected_code, start_date, end_date)
+
+    # Acciones consultables de los KPI.
+    if "re_detail_panel" not in st.session_state:
+        st.session_state["re_detail_panel"] = None
+
+    a1, a2, a3, a4, a5 = st.columns(5, gap="small")
+    with a2:
+        if st.button("⌕ Consultar documentos", width="stretch", key="re_open_docs"):
+            st.session_state["re_detail_panel"] = (
+                None if st.session_state["re_detail_panel"] == "docs" else "docs"
+            )
+    with a3:
+        if st.button("⌕ Consultar clientes", width="stretch", key="re_open_clients"):
+            st.session_state["re_detail_panel"] = (
+                None if st.session_state["re_detail_panel"] == "clients" else "clients"
+            )
+    with a5:
+        if st.button("⌕ Consultar NC", width="stretch", key="re_open_nc"):
+            st.session_state["re_detail_panel"] = (
+                None if st.session_state["re_detail_panel"] == "nc" else "nc"
+            )
+
+    detail_panel = st.session_state.get("re_detail_panel")
+
+    if detail_panel:
+        with st.container(border=True):
+            head_left, head_right = st.columns([5.3, .7])
+            with head_right:
+                if st.button("✕", help="Cerrar detalle", width="stretch", key="re_close_detail"):
+                    st.session_state["re_detail_panel"] = None
+                    st.rerun()
+
+            if detail_panel == "docs":
+                all_detail = _document_detail(current, no_vat, client_col, legal_col)
+
+                with head_left:
+                    render_html(
+                        "<div class='re-card-title'>Detalle de documentos</div>"
+                        "<div class='re-card-sub'>Facturas y boletas del período y vendedor seleccionados</div>"
+                    )
+
+                s1, s2 = st.columns([3.7, 1.3], gap="small")
+                with s1:
+                    q = st.text_input(
+                        "Buscar",
+                        placeholder="Número, cliente, código o tipo de documento...",
+                        key="re_search_docs",
+                        label_visibility="collapsed",
+                    )
+                with s2:
+                    doc_type = st.selectbox(
+                        "Tipo",
+                        ["Todos", "Factura", "Boleta"],
+                        key="re_doc_type_detail",
+                        label_visibility="collapsed",
+                    )
+
+                detail = all_detail
+                if doc_type != "Todos" and not detail.empty:
+                    detail = detail[
+                        detail["Tipo"].astype(str).str.contains(doc_type, case=False, na=False)
+                    ]
+                detail = _search_table(detail, q)
+
+                total_detail = float(pd.to_numeric(detail.get("Venta neta", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+                render_html(
+                    "<div class='re-detail-summary'>"
+                    f"<span class='re-detail-pill'>{len(detail):,} documentos</span>"
+                    f"<span class='re-detail-pill'>Venta listada: {html.escape(format_clp(total_detail))}</span>"
+                    "</div>".replace(",", ".")
+                )
+
+                st.dataframe(
+                    detail,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Venta neta": st.column_config.NumberColumn("Venta neta", format="$ %.0f"),
+                    },
+                )
+                st.download_button(
+                    "⬇ Exportar documentos",
+                    data=detail.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"documentos_{start_date}_{end_date}.csv",
+                    mime="text/csv",
+                    key="re_export_docs",
+                )
+
+            elif detail_panel == "clients":
+                all_detail = _client_detail(current, no_vat, client_col, legal_col)
+
+                with head_left:
+                    render_html(
+                        "<div class='re-card-title'>Clientes atendidos</div>"
+                        "<div class='re-card-sub'>Consulta comercial de clientes con movimientos en el período</div>"
+                    )
+
+                q = st.text_input(
+                    "Buscar",
+                    placeholder="Razón social o CódigoLegal...",
+                    key="re_search_clients",
+                    label_visibility="collapsed",
+                )
+                detail = _search_table(all_detail, q)
+
+                total_detail = float(pd.to_numeric(detail.get("Venta neta", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+                render_html(
+                    "<div class='re-detail-summary'>"
+                    f"<span class='re-detail-pill'>{len(detail):,} clientes</span>"
+                    f"<span class='re-detail-pill'>Venta neta: {html.escape(format_clp(total_detail))}</span>"
+                    "</div>".replace(",", ".")
+                )
+
+                st.dataframe(
+                    detail,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Documentos": st.column_config.NumberColumn("Documentos", format="%d"),
+                        "Venta neta": st.column_config.NumberColumn("Venta neta", format="$ %.0f"),
+                    },
+                )
+                st.download_button(
+                    "⬇ Exportar clientes",
+                    data=detail.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"clientes_{start_date}_{end_date}.csv",
+                    mime="text/csv",
+                    key="re_export_clients",
+                )
+
+            elif detail_panel == "nc":
+                all_detail = _credit_detail(current, no_vat, client_col, legal_col)
+
+                with head_left:
+                    render_html(
+                        "<div class='re-card-title'>Notas de crédito</div>"
+                        "<div class='re-card-sub'>Detalle de devoluciones y ajustes del período seleccionado</div>"
+                    )
+
+                q = st.text_input(
+                    "Buscar",
+                    placeholder="Número de NC, razón social o CódigoLegal...",
+                    key="re_search_nc",
+                    label_visibility="collapsed",
+                )
+                detail = _search_table(all_detail, q)
+
+                total_detail = float(pd.to_numeric(detail.get("Monto NC", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+                render_html(
+                    "<div class='re-detail-summary'>"
+                    f"<span class='re-detail-pill'>{len(detail):,} notas de crédito</span>"
+                    f"<span class='re-detail-pill'>Monto listado: {html.escape(format_clp(total_detail))}</span>"
+                    "</div>".replace(",", ".")
+                )
+
+                st.dataframe(
+                    detail,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Monto NC": st.column_config.NumberColumn("Monto NC", format="$ %.0f"),
+                    },
+                )
+                st.download_button(
+                    "⬇ Exportar notas de crédito",
+                    data=detail.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"notas_credito_{start_date}_{end_date}.csv",
+                    mime="text/csv",
+                    key="re_export_nc",
+                )
+
+    # ------------------------- bloque central -------------------------
+    left, middle, right = st.columns([1.45, .92, 1.0], gap="small")
+
+    # Evolución
+    with left:
+        with st.container(border=True):
+            render_html(
+                "<div class='re-panel-head'>"
+                "<div><div class='re-panel-title'>Evolución de ventas netas</div>"
+                "<div class='re-panel-sub'>Comportamiento diario del período seleccionado</div></div>"
+                "<div class='re-panel-chip yellow'>● Venta neta</div>"
+                "</div>"
+            )
+
+            current_daily = current.copy()
+            current_daily["_VentaNeta"] = _signed_amount(current_daily, no_vat)
+            current_daily["Día"] = current_daily["Fecha_dt"].dt.normalize()
+            current_daily = (
+                current_daily.groupby("Día", as_index=False)["_VentaNeta"]
+                .sum()
+                .rename(columns={"_VentaNeta": "Venta"})
+            )
+            current_daily["Serie"] = "Este período"
+            current_daily["Índice"] = range(1, len(current_daily) + 1)
+
+            prev_daily = previous.copy()
+            prev_daily["_VentaNeta"] = _signed_amount(prev_daily, no_vat)
+            prev_daily["Día"] = prev_daily["Fecha_dt"].dt.normalize()
+            prev_daily = (
+                prev_daily.groupby("Día", as_index=False)["_VentaNeta"]
+                .sum()
+                .rename(columns={"_VentaNeta": "Venta"})
+            )
+            prev_daily["Serie"] = "Período anterior"
+            prev_daily["Índice"] = range(1, len(prev_daily) + 1)
+
+            if current_daily.empty and prev_daily.empty:
+                st.info("Sin movimientos para graficar.")
+            else:
+                chart_data = current_daily
+                if compare_previous and not prev_daily.empty:
+                    chart_data = pd.concat([current_daily, prev_daily], ignore_index=True)
+
+                base_chart = (
+                    alt.Chart(chart_data)
+                    .encode(
+                        x=alt.X("Índice:Q", title=None, axis=alt.Axis(labels=False, ticks=False)),
+                        y=alt.Y(
+                            "Venta:Q",
+                            title=None,
+                            axis=alt.Axis(format="~s", grid=True, gridColor="#26323b"),
+                        ),
+                        color=alt.Color(
+                            "Serie:N",
+                            title=None,
+                            scale=alt.Scale(
+                                domain=["Este período", "Período anterior"],
+                                range=["#f5b400", "#b8c0cc"],
+                            ),
+                            legend=alt.Legend(orient="top"),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Día:T", title="Fecha"),
+                            alt.Tooltip("Venta:Q", title="Venta neta", format=",.0f"),
+                            alt.Tooltip("Serie:N", title="Serie"),
+                        ],
+                    )
+                )
+
+                line = base_chart.mark_line(strokeWidth=2.3)
+                points = (
+                    alt.Chart(current_daily)
+                    .mark_circle(size=48, color="#f5b400")
+                    .encode(
+                        x=alt.X("Índice:Q", title=None, axis=alt.Axis(labels=False, ticks=False)),
+                        y=alt.Y("Venta:Q", title=None),
+                        tooltip=[
+                            alt.Tooltip("Día:T", title="Fecha"),
+                            alt.Tooltip("Venta:Q", title="Venta neta", format=",.0f"),
+                        ],
+                    )
+                )
+                st.altair_chart((line + points).properties(height=245), width="stretch")
+
+    # Composición
+    with middle:
+        with st.container(border=True):
+            render_html("<div class='re-panel-head'><div><div class='re-panel-title'>Composición de documentos</div><div class='re-panel-sub'>Participación por tipo de documento</div></div><div class='re-panel-chip'>Mix comercial</div></div>")
+
+            inv = _group_amount(current, "Factura", no_vat)
+            bol = _group_amount(current, "Boleta", no_vat)
+            nc = _group_amount(current, "Nota de crédito", no_vat)
+
+            donut_df = pd.DataFrame(
+                {
+                    "Tipo": ["Facturas", "Boletas", "Notas de Crédito"],
+                    "Monto": [inv, bol, nc],
+                }
+            )
+            donut_df = donut_df[donut_df["Monto"] > 0]
+
+            if donut_df.empty:
+                st.info("Sin documentos en el período.")
+            else:
+                donut = (
+                    alt.Chart(donut_df)
+                    .mark_arc(innerRadius=58, outerRadius=90)
+                    .encode(
+                        theta=alt.Theta("Monto:Q"),
+                        color=alt.Color(
+                            "Tipo:N",
+                            scale=alt.Scale(
+                                domain=["Facturas", "Boletas", "Notas de Crédito"],
+                                range=["#f5b400", "#2e6bdc", "#df3026"],
+                            ),
+                            legend=None,
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Tipo:N", title="Tipo"),
+                            alt.Tooltip("Monto:Q", title="Monto", format=",.0f"),
+                        ],
+                    )
+                    .properties(height=190)
+                )
+                st.altair_chart(donut, width="stretch")
+
+            total_positive = inv + bol
+            inv_pct = inv / total_positive * 100 if total_positive else 0
+            bol_pct = bol / total_positive * 100 if total_positive else 0
+            nc_pct = nc / total_positive * 100 if total_positive else 0
+
+            render_html(
+                f"""
+                <div class="re-doc-breakdown">
+                  <div class="re-doc-row">
+                    <span class="re-doc-dot" style="background:#ffc400"></span>
+                    <span class="re-doc-name">Facturas</span>
+                    <span class="re-doc-value">{format_clp(inv)}</span>
+                    <span class="re-doc-pct">{_fmt_pct(inv_pct, False)}</span>
+                  </div>
+                  <div class="re-doc-row">
+                    <span class="re-doc-dot" style="background:#3b82f6"></span>
+                    <span class="re-doc-name">Boletas</span>
+                    <span class="re-doc-value">{format_clp(bol)}</span>
+                    <span class="re-doc-pct">{_fmt_pct(bol_pct, False)}</span>
+                  </div>
+                  <div class="re-doc-row">
+                    <span class="re-doc-dot" style="background:#ef3d34"></span>
+                    <span class="re-doc-name">Notas de crédito</span>
+                    <span class="re-doc-value">-{format_clp(nc)}</span>
+                    <span class="re-doc-pct">-{_fmt_pct(nc_pct, False)}</span>
+                  </div>
+                </div>
+                <div class="re-net-formula">
+                  <strong>Venta neta</strong> = Facturas + Boletas − Notas de crédito
+                </div>
+                """
+            )
+
+    # Top clientes
+    with right:
+        with st.container(border=True):
+            render_html("<div class='re-panel-head'><div><div class='re-panel-title'>Top clientes</div><div class='re-panel-sub'>Clientes con mayor venta neta</div></div><div class='re-panel-chip'>Top 5</div></div>")
+            clients = _client_table(current, no_vat, client_col, legal_col).head(5)
+
+            if clients.empty:
+                st.info("Sin clientes identificados.")
+            else:
+                rows = []
+                max_client_value = float(clients["Venta neta"].max()) if not clients.empty else 0.0
+                for idx, row in enumerate(clients.itertuples(index=False), start=1):
+                    row_value = float(row[1])
+                    width = (row_value / max_client_value * 100) if max_client_value > 0 else 0
+                    rows.append(
+                        f"""
+                        <div class="re-client-row">
+                          <div class="re-client-rank">{idx}</div>
+                          <div class="re-client-name">{html.escape(str(row[0]))}</div>
+                          <div class="re-client-value">{format_clp(row_value)}</div>
+                          <div class="re-client-bar"><i style="width:{width:.1f}%"></i></div>
+                        </div>
+                        """
+                    )
+                render_html(
+                    """
+                    <div class="re-client-head">
+                      <div></div><div>Cliente</div><div>Venta Neta (CLP)</div>
+                    </div>
+                    """
+                    + "".join(rows)
+                )
+
+    # ------------------------- bloque inferior -------------------------
+    lower_left, lower_right = st.columns([1.55, 1.0], gap="small")
+
+    with lower_left:
+        with st.container(border=True):
+            render_html(
+                "<div class='re-panel-head'>"
+                "<div><div class='re-panel-title'>Últimas ventas</div>"
+                "<div class='re-panel-sub'>Documentos comerciales más recientes del período</div></div>"
+                "<div class='re-panel-chip'>Últimos 8</div>"
+                "</div>"
+            )
+            latest = _latest_sales(current, no_vat, client_col)
+            if latest.empty:
+                st.info("Sin ventas para mostrar.")
+            else:
+                sales_rows = []
+                for item in latest.itertuples(index=False):
+                    sales_rows.append(
+                        f"""
+                        <div class="re-sales-row">
+                          <div>{html.escape(str(item[0]))}</div>
+                          <div>{html.escape(str(item[1]))}</div>
+                          <div><span class="re-sale-type">{html.escape(str(item[2]))}</span></div>
+                          <div title="{html.escape(str(item[3]))}">{html.escape(str(item[3]))}</div>
+                          <div class="re-money">{format_clp(float(item[4]))}</div>
+                          <div class="re-money nc">{format_clp(float(item[5]))}</div>
+                          <div class="re-money">{format_clp(float(item[6]))}</div>
+                        </div>
+                        """
+                    )
+
+                render_html(
+                    """
+                    <div class="re-sales-table">
+                      <div class="re-sales-head">
+                        <div>Fecha</div>
+                        <div>Documento</div>
+                        <div>Tipo</div>
+                        <div>Cliente</div>
+                        <div>Monto bruto</div>
+                        <div>Notas crédito</div>
+                        <div>Venta neta</div>
+                      </div>
+                    """
+                    + "".join(sales_rows)
+                    + "</div>"
+                )
+
+    with lower_right:
+        with st.container(border=True):
+            render_html(
+                f"<div class='re-panel-head'>"
+                f"<div><div class='re-panel-title'>Ranking de vendedores</div>"
+                f"<div class='re-panel-sub'>Período: {pd.Timestamp(start_date).strftime('%d/%m/%Y')} - {pd.Timestamp(end_date).strftime('%d/%m/%Y')}</div></div>"
+                f"<div class='re-panel-chip yellow'>Venta neta</div>"
+                f"</div>"
+            )
+
+            # Ranking usa todos los vendedores/canales del grupo seleccionado,
+            # aunque arriba haya un vendedor específico elegido.
+            rank_scope = base.copy()
+            if seller_group != "Todos":
+                rank_scope = rank_scope[rank_scope["_VendedorGrupo"].eq(seller_group)].copy()
+
+            rank_cur = _date_filter(rank_scope, start_date, end_date)
+            rank_prev = _date_filter(rank_scope, prev_start, prev_end)
+
+            def build_rank(frame):
+                if frame.empty:
+                    return pd.DataFrame(columns=["_VendedorCodigo", "_VendedorNombre", "Venta"])
+                tmp = frame.copy()
+                tmp["_Venta"] = _signed_amount(tmp, no_vat)
+                return (
+                    tmp.groupby(["_VendedorCodigo", "_VendedorNombre"], dropna=False)["_Venta"]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={"_Venta": "Venta"})
+                )
+
+            rc = build_rank(rank_cur)
+            rp = build_rank(rank_prev).rename(columns={"Venta": "VentaPrev"})
+            ranking = rc.merge(rp[["_VendedorCodigo", "VentaPrev"]], on="_VendedorCodigo", how="left")
+            ranking["VentaPrev"] = ranking["VentaPrev"].fillna(0)
+            ranking["Variacion"] = ranking.apply(
+                lambda r: _pct_change(r["Venta"], r["VentaPrev"]), axis=1
+            )
+            ranking = ranking.sort_values("Venta", ascending=False).head(7).reset_index(drop=True)
+
+            if ranking.empty:
+                st.info("Sin vendedores para rankear.")
+            else:
+                render_html(
+                    """
+                    <div class="re-rank-head">
+                      <div></div><div>Vendedor</div><div style="text-align:right">Venta Neta</div><div style="text-align:right">vs anterior</div>
+                    </div>
+                    """
+                )
+                rank_rows = []
+                max_rank_value = float(ranking["Venta"].max()) if not ranking.empty else 0.0
+                for i, row in ranking.iterrows():
+                    is_current = selected_code and row["_VendedorCodigo"] == selected_code
+                    cls = "re-rank-row current" if is_current else "re-rank-row"
+                    var_cls = "up" if row["Variacion"] >= 0 else "down"
+                    arrow = "▲" if row["Variacion"] >= 0 else "▼"
+                    width = (float(row["Venta"]) / max_rank_value * 100) if max_rank_value > 0 else 0
+                    rank_rows.append(
+                        f"""
+                        <div class="{cls}">
+                          <div class="re-rank-pos">{i + 1}</div>
+                          <div class="re-rank-name">{html.escape(str(row['_VendedorNombre']))}</div>
+                          <div class="re-rank-value">{format_clp(float(row['Venta']))}</div>
+                          <div class="re-rank-var {var_cls}">{arrow} {_fmt_pct(abs(row['Variacion']), False)}</div>
+                          <div class="re-rank-bar"><i style="width:{width:.1f}%"></i></div>
+                        </div>
+                        """
+                    )
+                render_html("".join(rank_rows))
+
+    # ------------------------- seguimiento de meta comercial -------------------------
+    st.markdown("### Seguimiento de meta comercial")
+
+    # La meta se ingresa manualmente. No se inventan metas oficiales.
+    seller_label_for_goal = selected_label if selected_label != "Todos" else "Equipo seleccionado"
+    goal_key = f"re_goal_v960_{str(selected_code or seller_group).replace(' ', '_').replace('/', '_')}"
+
+    goal_col, status_col = st.columns([1.05, 2.95], gap="large")
+
+    with goal_col:
+        monthly_goal = st.number_input(
+            "Meta mensual (CLP)",
+            min_value=0,
+            value=int(st.session_state.get(goal_key, 0) or 0),
+            step=500000,
+            key=goal_key,
+            help="Ingresa la meta oficial del vendedor o canal. Se mantiene durante la sesión.",
+        )
+
+        st.caption(
+            f"Meta aplicada a: **{seller_label_for_goal}**. "
+            "Si no existe una meta oficial cargada, déjala en $0."
+        )
+
+    # Cálculo de avance y proyección
+    net_sales_now = float(cur.get("net", 0) or 0)
+
+    # Para proyectar usamos días calendario transcurridos dentro del mes seleccionado,
+    # hasta la última fecha con movimiento disponible dentro del período.
+    if not current.empty and "Fecha_dt" in current.columns:
+        valid_dates = pd.to_datetime(current["Fecha_dt"], errors="coerce").dropna()
+        last_sales_date = valid_dates.max().date() if not valid_dates.empty else start_date
+    else:
+        last_sales_date = start_date
+
+    effective_date = min(max(last_sales_date, start_date), end_date)
+    elapsed_days = max((effective_date - month_start).days + 1, 1)
+    total_month_days = max((month_end - month_start).days + 1, 1)
+
+    projected_close = (net_sales_now / elapsed_days) * total_month_days if elapsed_days else 0
+    remaining = max(float(monthly_goal) - net_sales_now, 0) if monthly_goal > 0 else 0
+    achievement = (net_sales_now / float(monthly_goal) * 100) if monthly_goal > 0 else 0
+    projected_achievement = (
+        projected_close / float(monthly_goal) * 100
+        if monthly_goal > 0 else 0
+    )
+
+    days_left = max((month_end - effective_date).days, 0)
+    daily_needed = (remaining / days_left) if monthly_goal > 0 and days_left > 0 else 0
+
+    with status_col:
+        if monthly_goal > 0:
+            progress_value = min(max(achievement / 100, 0), 1)
+            st.progress(
+                progress_value,
+                text=f"{achievement:.1f}% de cumplimiento · {format_clp(net_sales_now)} de {format_clp(monthly_goal)}",
+            )
+
+            m1, m2, m3, m4 = st.columns(4, gap="small")
+            m1.metric(
+                "Falta para la meta",
+                format_clp(remaining),
+                help="Monto pendiente para alcanzar la meta mensual.",
+            )
+            m2.metric(
+                "Días restantes",
+                f"{days_left}",
+                help="Días calendario restantes desde la última fecha con movimiento del período.",
+            )
+            m3.metric(
+                "Venta diaria necesaria",
+                format_clp(daily_needed) if days_left > 0 else format_clp(remaining),
+                help="Promedio diario requerido para alcanzar la meta al cierre de mes.",
+            )
+            m4.metric(
+                "Proyección de cierre",
+                format_clp(projected_close),
+                delta=f"{projected_achievement:.1f}% de la meta",
+                help="Proyección lineal según el ritmo de venta acumulado.",
+            )
+
+            if achievement >= 100:
+                st.success(
+                    f"Meta alcanzada. El avance actual es {achievement:.1f}% "
+                    f"y supera la meta en {format_clp(net_sales_now - monthly_goal)}."
+                )
+            elif projected_close >= monthly_goal:
+                st.info(
+                    f"Al ritmo actual, la proyección de cierre es {format_clp(projected_close)} "
+                    f"({projected_achievement:.1f}% de la meta)."
+                )
+            else:
+                projected_gap = max(monthly_goal - projected_close, 0)
+                st.warning(
+                    f"Al ritmo actual, la proyección quedaría {format_clp(projected_gap)} "
+                    f"bajo la meta. Se requieren aproximadamente {format_clp(daily_needed)} "
+                    f"por día durante los {days_left} días restantes."
+                )
+        else:
+            st.info(
+                "Ingresa una **meta mensual oficial** para activar el % de cumplimiento, "
+                "monto faltante, venta diaria necesaria y proyección de cierre."
+            )

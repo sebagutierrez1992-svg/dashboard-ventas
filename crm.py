@@ -1,0 +1,5687 @@
+
+
+from datetime import datetime, timedelta
+from html import escape
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
+from services.crm_service import (
+    create_followup,
+    create_opportunity,
+    get_crm_summary,
+    get_pipeline_summary,
+    list_followups,
+    list_opportunities,
+    update_followup,
+    update_opportunity,
+)
+
+from services.commercial_dashboard_service import (
+    commercial_metrics,
+    filter_commercial_view,
+    prepare_commercial_base,
+    signed_amount,
+    seller_name as shared_seller_name,
+)
+
+from views.crm_ficha_360_cliente import render_client_360
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+CRM_TABS = (
+    "Resumen Ejecutivo",
+    "Clientes",
+    "Ficha 360°",
+    "Oportunidades",
+    "Seguimientos",
+    "Tubería",
+)
+
+
+CRM_STAGES = (
+    "Prospección",
+    "Contacto",
+    "Cotización",
+    "Negociación",
+    "Cierre",
+)
+
+CRM_STATUSES = (
+    "Abierta",
+    "Ganada",
+    "Perdida",
+)
+
+CRM_STAGE_PROBABILITY = {
+    "Prospección": 10,
+    "Contacto": 25,
+    "Cotización": 50,
+    "Negociación": 75,
+    "Cierre": 90,
+}
+
+
+CRM_FOLLOWUP_TYPES = (
+    "Llamada",
+    "Correo",
+    "Reunión",
+    "WhatsApp",
+    "Tarea",
+    "Nota",
+)
+
+
+# ============================================================
+# ESTILOS
+# ============================================================
+
+def _apply_styles() -> None:
+    st.markdown(
+        """
+<style>
+/* =========================================================
+   CRM MARITEX · FUNCIONALIDAD TIPO MONDAY
+   Paleta: negro / grafito / blanco / grises / amarillo
+   ========================================================= */
+
+.block-container{
+    max-width:1750px;
+    padding-top:.8rem;
+    padding-bottom:2rem;
+}
+
+[data-testid="stAppViewContainer"]{
+    background:
+        radial-gradient(circle at 80% 0%, rgba(255,196,0,.035), transparent 24%),
+        #000000;
+}
+
+[data-testid="stHeader"]{
+    background:rgba(13,20,26,.94);
+}
+
+div[data-testid="stVerticalBlock"]{
+    gap:.68rem;
+}
+
+/* ---------------------------------------------------------
+   CABECERA
+   --------------------------------------------------------- */
+
+.crm-page-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:18px;
+    padding:14px 18px;
+    border:1px solid #26323C;
+    border-radius:14px;
+    background:linear-gradient(145deg,#101010,#080808);
+    box-shadow:0 4px 18px rgba(0,0,0,.18);
+    margin-bottom:8px;
+}
+
+.crm-page-head h1{
+    margin:0;
+    color:#FFFFFF;
+    font-size:28px;
+    line-height:1;
+    letter-spacing:-.65px;
+    font-weight:850;
+}
+
+.crm-page-head p{
+    margin:7px 0 0;
+    color:#9BA7B1;
+    font-size:11px;
+}
+
+.crm-live-pill{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding:8px 12px;
+    border:1px solid #31404B;
+    border-radius:999px;
+    background:#0A0A0A;
+    color:#DCE3E8;
+    font-size:9px;
+    font-weight:750;
+    white-space:nowrap;
+}
+
+.crm-live-pill i{
+    display:block;
+    width:8px;
+    height:8px;
+    border-radius:999px;
+    background:#19C96A;
+    box-shadow:0 0 0 4px rgba(25,201,106,.10);
+}
+
+/* ---------------------------------------------------------
+   NAVEGACIÓN CRM
+   --------------------------------------------------------- */
+
+div[data-testid="stSegmentedControl"]{
+    background:#0A0A0A;
+    border:1px solid #2C3943;
+    border-radius:10px;
+    padding:3px;
+}
+
+div[data-testid="stSegmentedControl"] button{
+    color:#D6DEE4 !important;
+    border-radius:7px !important;
+    font-size:9.5px !important;
+    font-weight:760 !important;
+}
+
+div[data-testid="stSegmentedControl"] button[aria-pressed="true"]{
+    background:#2A250D !important;
+    color:#FFC400 !important;
+    box-shadow:inset 0 0 0 1px #CFA300 !important;
+}
+
+/* ---------------------------------------------------------
+   SECCIONES
+   --------------------------------------------------------- */
+
+.crm-section-kicker{
+    color:#FFC400;
+    text-transform:uppercase;
+    letter-spacing:.11em;
+    font-size:7.5px;
+    font-weight:900;
+    margin-bottom:3px;
+}
+
+.crm-section-title{
+    color:#FFFFFF;
+    font-size:15px;
+    font-weight:850;
+    margin:0 0 3px;
+}
+
+.crm-section-sub{
+    color:#84919C;
+    font-size:8.5px;
+    margin-bottom:8px;
+}
+
+/* ---------------------------------------------------------
+   TOOLBAR / FILTROS
+   --------------------------------------------------------- */
+
+.crm-toolbar{
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:12px;
+    margin:10px 0 8px;
+}
+
+.crm-toolbar-left{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+}
+
+.crm-toolbar-right{
+    display:flex;
+    gap:8px;
+    align-items:center;
+}
+
+.crm-view-tabs{
+    display:flex;
+    gap:0;
+    border:1px solid #2E3B45;
+    border-radius:8px;
+    overflow:hidden;
+    background:#0A0A0A;
+}
+
+.crm-view-tab{
+    padding:8px 15px;
+    color:#CCD5DC;
+    font-size:9px;
+    font-weight:760;
+    border-right:1px solid #2E3B45;
+}
+
+.crm-view-tab:last-child{
+    border-right:0;
+}
+
+.crm-view-tab.active{
+    color:#FFC400;
+    background:#201C0B;
+    box-shadow:inset 0 0 0 1px #C99D00;
+}
+
+/* ---------------------------------------------------------
+   KPIs
+   --------------------------------------------------------- */
+
+.crm-kpis{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:10px;
+    margin:10px 0 12px;
+}
+
+.crm-kpi{
+    position:relative;
+    overflow:visible;
+    min-height:104px;
+    border:1px solid #2C3943;
+    border-radius:10px;
+    padding:14px 15px;
+    background:linear-gradient(145deg,#101010,#090909);
+    box-shadow:0 3px 14px rgba(0,0,0,.15);
+}
+
+.crm-kpi::before{
+    content:"";
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:3px;
+    background:#FFC400;
+}
+
+.crm-kpi-label{
+    color:#A7B2BB;
+    font-size:8px;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    font-weight:850;
+}
+
+.crm-kpi-value{
+    color:#FFFFFF;
+    font-size:22px;
+    font-weight:900;
+    line-height:1;
+    margin-top:8px;
+    letter-spacing:-.4px;
+}
+
+.crm-kpi-help{
+    color:#8996A1;
+    font-size:8px;
+    margin-top:9px;
+    font-weight:650;
+}
+
+.crm-kpi-help.accent{
+    color:#FFC400;
+}
+
+/* ---------------------------------------------------------
+   BOARD
+   --------------------------------------------------------- */
+
+.crm-board-wrap{
+    margin-top:4px;
+}
+
+.crm-stage-head{
+    border:1px solid #2D3A44;
+    border-radius:10px 10px 6px 6px;
+    padding:11px 12px 9px;
+    margin-bottom:6px;
+    background:linear-gradient(145deg,#111111,#090909);
+    position:relative;
+    overflow:hidden;
+}
+
+.crm-stage-head::before{
+    content:"";
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    height:3px;
+    background:#FFC400;
+}
+
+.crm-stage-name{
+    color:#FFFFFF;
+    font-size:10px;
+    font-weight:900;
+    text-transform:uppercase;
+    letter-spacing:.02em;
+    margin-top:2px;
+}
+
+.crm-stage-countline{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-top:7px;
+}
+
+.crm-stage-count{
+    color:#FFFFFF;
+    font-size:17px;
+    font-weight:850;
+}
+
+.crm-stage-total{
+    color:#96A2AC;
+    font-size:8px;
+}
+
+.crm-kanban-card{
+    border:1px solid #2E3B46;
+    border-radius:9px;
+    padding:11px;
+    margin-bottom:7px;
+    background:linear-gradient(145deg,#101010,#090909);
+    box-shadow:0 3px 12px rgba(0,0,0,.18);
+}
+
+.crm-kanban-id{
+    color:#7F8B95;
+    font-size:7.4px;
+    margin-bottom:5px;
+}
+
+.crm-kanban-client{
+    color:#FFFFFF;
+    font-size:9.8px;
+    font-weight:900;
+    line-height:1.25;
+}
+
+.crm-kanban-title{
+    color:#A8B2BB;
+    font-size:8.3px;
+    margin-top:4px;
+}
+
+.crm-kanban-money{
+    color:#FFC400;
+    font-size:12px;
+    font-weight:900;
+    margin-top:10px;
+}
+
+.crm-kanban-chip{
+    display:inline-flex;
+    padding:3px 7px;
+    border-radius:999px;
+    border:1px solid #7F6500;
+    background:#201B05;
+    color:#FFC400;
+    font-size:7.2px;
+    font-weight:850;
+    margin-top:6px;
+}
+
+.crm-kanban-meta{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    color:#9BA7B1;
+    font-size:7.5px;
+    margin-top:9px;
+}
+
+.crm-kanban-label{
+    color:#7F8B95;
+    font-size:7.2px;
+    margin-top:8px;
+}
+
+.crm-kanban-action{
+    color:#DCE3E8;
+    font-size:8px;
+    margin-top:2px;
+    line-height:1.3;
+}
+
+.crm-stage-empty{
+    border:1px dashed #3A4650;
+    border-radius:8px;
+    padding:19px 8px;
+    color:#7F8B95;
+    text-align:center;
+    font-size:8px;
+    background:#070707;
+}
+
+/* ---------------------------------------------------------
+   BOTONES
+   --------------------------------------------------------- */
+
+.stButton>button{
+    border-radius:7px !important;
+    min-height:33px !important;
+    font-size:8.8px !important;
+    font-weight:780 !important;
+    border:1px solid #33414C !important;
+    background:#0A0A0A !important;
+    color:#DCE4EA !important;
+}
+
+.stButton>button:hover{
+    border-color:#FFC400 !important;
+    color:#FFC400 !important;
+}
+
+.stButton>button[kind="primary"]{
+    background:#FFC400 !important;
+    border-color:#FFC400 !important;
+    color:#191500 !important;
+}
+
+/* ---------------------------------------------------------
+   INPUTS
+   --------------------------------------------------------- */
+
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] div[data-baseweb="select"]>div,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input{
+    background:#0A0A0A !important;
+    border-color:#2F3B45 !important;
+    color:#EEF2F5 !important;
+    border-radius:7px !important;
+}
+
+[data-testid="stTextInput"] label,
+[data-testid="stTextArea"] label,
+[data-testid="stSelectbox"] label,
+[data-testid="stNumberInput"] label,
+[data-testid="stDateInput"] label,
+[data-testid="stRadio"] label{
+    color:#A7B2BB !important;
+    font-size:8px !important;
+    font-weight:760 !important;
+}
+
+/* ---------------------------------------------------------
+   CONTAINERS / TABLES / EXPANDERS
+   --------------------------------------------------------- */
+
+div[data-testid="stVerticalBlockBorderWrapper"]{
+    border:1px solid #2C3943 !important;
+    background:#0A0A0A !important;
+    border-radius:10px !important;
+    box-shadow:0 3px 14px rgba(0,0,0,.14) !important;
+}
+
+div[data-testid="stDataFrame"]{
+    border:1px solid #2C3943;
+    border-radius:9px;
+    overflow:hidden;
+    background:#090909;
+}
+
+div[data-testid="stDataFrame"] *{
+    color:#EAF0F4;
+}
+
+div[data-testid="stMetric"]{
+    border:1px solid #2C3943;
+    border-radius:9px;
+    background:#0A0A0A;
+    padding:9px 11px;
+}
+
+div[data-testid="stMetricLabel"]{
+    color:#A7B2BB !important;
+    font-size:8px !important;
+    font-weight:760 !important;
+}
+
+div[data-testid="stMetricValue"]{
+    color:#FFFFFF !important;
+    font-size:18px !important;
+}
+
+details{
+    background:#0A0A0A !important;
+    border:1px solid #2C3943 !important;
+    border-radius:9px !important;
+}
+
+details summary{
+    color:#DCE3E8 !important;
+    font-size:9px !important;
+    font-weight:780 !important;
+}
+
+/* ---------------------------------------------------------
+   CLIENTES / RESUMEN
+   --------------------------------------------------------- */
+
+.crm-client-title{
+    color:#FFFFFF;
+    font-size:18px;
+    font-weight:900;
+    margin-bottom:2px;
+}
+
+.crm-client-sub{
+    color:#8C99A3;
+    font-size:9px;
+    margin-bottom:8px;
+}
+
+.crm-top-row{
+    display:grid;
+    grid-template-columns:28px minmax(0,1.6fr) 110px 92px 65px 90px;
+    gap:8px;
+    align-items:center;
+    min-height:38px;
+    border-bottom:1px solid #25313A;
+    font-size:8.2px;
+}
+
+.crm-top-row.header{
+    color:#87939D;
+    font-size:7.2px;
+    text-transform:uppercase;
+    font-weight:750;
+}
+
+.crm-top-row:last-child{border-bottom:0}
+.crm-rank{color:#87939D;font-weight:800}
+.crm-client-name{
+    color:#EEF2F5;
+    font-weight:800;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+.crm-client-rut{color:#A7B2BB}
+.crm-money{color:#FFC400;font-weight:900;text-align:right}
+.crm-orders{color:#D2DAE0;text-align:right}
+.crm-date{color:#A1ADB7;text-align:right}
+
+.crm-empty{
+    min-height:150px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    border:1px dashed #3A4650;
+    border-radius:9px;
+    color:#8B98A2;
+    padding:18px;
+    background:#070707;
+}
+
+.crm-empty strong{
+    color:#E6ECEF;
+    font-size:11px;
+    margin-bottom:4px;
+}
+
+.crm-empty span{
+    font-size:8.2px;
+    max-width:340px;
+}
+
+hr{
+    border-color:#25313A !important;
+}
+
+@media(max-width:1100px){
+    .crm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+@media(max-width:700px){
+    .crm-page-head{
+        flex-direction:column;
+        align-items:flex-start;
+    }
+    .crm-kpis{grid-template-columns:1fr}
+}
+
+/* HELPERS MARITEX */
+.crm-help{
+    position:relative;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex:0 0 auto;
+    width:15px;
+    height:15px;
+    margin-left:6px;
+    border:1px solid #66727C;
+    border-radius:50%;
+    color:#FFC400;
+    background:#0A0A0A;
+    font-size:9px;
+    font-weight:900;
+    line-height:1;
+    cursor:help;
+    vertical-align:middle;
+    z-index:20;
+}
+
+.crm-help:hover{
+    border-color:#FFC400;
+    background:#2A250D;
+}
+
+/* Tooltip general */
+.crm-help .crm-help-tip{
+    visibility:hidden;
+    opacity:0;
+    position:absolute;
+    z-index:9999;
+    top:22px;
+    left:0;
+    width:230px;
+    max-width:min(230px, calc(100vw - 60px));
+    padding:10px 11px;
+    border:1px solid #3A4650;
+    border-radius:8px;
+    background:#090E12;
+    color:#E7EDF1;
+    font-size:8.7px;
+    font-weight:500;
+    line-height:1.45;
+    text-transform:none;
+    letter-spacing:0;
+    white-space:normal;
+    text-align:left;
+    box-shadow:0 8px 24px rgba(0,0,0,.38);
+    pointer-events:none;
+}
+
+.crm-help:hover .crm-help-tip{
+    visibility:visible;
+    opacity:1;
+}
+
+/* En títulos normales, abrir hacia la derecha pero dentro del área */
+.crm-title-line{
+    display:flex;
+    align-items:center;
+    gap:2px;
+    position:relative;
+    width:100%;
+}
+
+.crm-title-line .crm-help .crm-help-tip{
+    left:0;
+    right:auto;
+}
+
+/* En KPI: el tooltip se abre hacia adentro de la tarjeta */
+.crm-kpi{
+    overflow:visible !important;
+}
+
+.crm-kpi .crm-help{
+    position:static;
+}
+
+.crm-kpi .crm-help .crm-help-tip{
+    top:34px;
+    left:12px;
+    right:12px;
+    width:auto;
+    max-width:none;
+}
+
+/* En columnas Kanban / tarjetas: mantener texto dentro del bloque */
+.crm-stage-head,
+.crm-kanban-card,
+div[data-testid="stVerticalBlockBorderWrapper"]{
+    overflow:visible !important;
+}
+
+/* En pantallas pequeñas: tooltip ocupa casi todo el ancho disponible */
+@media(max-width:700px){
+    .crm-help .crm-help-tip{
+        position:fixed;
+        left:18px !important;
+        right:18px !important;
+        top:auto;
+        bottom:24px;
+        width:auto !important;
+        max-width:none !important;
+    }
+}
+
+
+/* =========================================================
+   AJUSTE VISUAL FINAL · CRM MARITEX
+   ========================================================= */
+
+/* Header más ejecutivo, como mockup */
+.crm-page-head{
+    position:relative;
+    padding:12px 16px 12px 20px !important;
+    border-radius:10px !important;
+    background:linear-gradient(180deg,#0A0A0A 0%,#050505 100%) !important;
+    border:1px solid #293741 !important;
+    box-shadow:none !important;
+}
+
+.crm-page-head::before{
+    content:"";
+    position:absolute;
+    left:0;
+    top:12px;
+    bottom:12px;
+    width:3px;
+    border-radius:0 3px 3px 0;
+    background:#FFC400;
+}
+
+.crm-page-head h1,
+.crm-page-head .crm-page-title{
+    font-size:27px !important;
+    letter-spacing:-.5px !important;
+}
+
+/* Selector vendedor tipo barra superior */
+div[data-testid="stSelectbox"] > div > div{
+    background:#0A0A0A !important;
+    border-color:#2D3C47 !important;
+    border-radius:8px !important;
+}
+
+/* Radio horizontal = tabs compactas con acento amarillo */
+div[role="radiogroup"]{
+    gap:0 !important;
+    border-bottom:1px solid #263540;
+    padding-bottom:0 !important;
+}
+
+div[role="radiogroup"] label{
+    padding:9px 14px 8px !important;
+    border-bottom:2px solid transparent;
+    margin:0 !important;
+    border-radius:0 !important;
+}
+
+div[role="radiogroup"] label:has(input:checked){
+    border-bottom-color:#FFC400 !important;
+    background:rgba(255,196,0,.035) !important;
+}
+
+div[role="radiogroup"] label:has(input:checked) p{
+    color:#FFC400 !important;
+}
+
+/* Resumen ejecutivo: títulos compactos */
+.crm-section-kicker{
+    color:#FFC400 !important;
+    font-size:8px !important;
+    letter-spacing:.09em !important;
+    margin-bottom:3px !important;
+}
+
+.crm-section-title{
+    font-size:17px !important;
+    font-weight:800 !important;
+}
+
+.crm-section-sub{
+    color:#81939F !important;
+}
+
+/* KPI como mockup */
+.crm-kpis{
+    gap:10px !important;
+}
+
+.crm-kpi{
+    min-height:112px !important;
+    border-radius:9px !important;
+    background:linear-gradient(180deg,#101010 0%,#080808 100%) !important;
+    border-color:#2D3B45 !important;
+    padding:14px 15px 12px 17px !important;
+    box-shadow:none !important;
+}
+
+.crm-kpi-value{
+    font-size:23px !important;
+    margin-top:11px !important;
+}
+
+.crm-kpi-label{
+    font-size:8px !important;
+    letter-spacing:.06em !important;
+}
+
+/* Contenedores inferiores */
+div[data-testid="stVerticalBlockBorderWrapper"]{
+    background:linear-gradient(180deg,#0A0A0A 0%,#070707 100%) !important;
+    border:1px solid #2A3944 !important;
+    border-radius:9px !important;
+    box-shadow:none !important;
+}
+
+/* Dataframes integrados a la paleta */
+div[data-testid="stDataFrame"]{
+    border-radius:8px !important;
+    overflow:hidden;
+    border:1px solid #263640;
+}
+
+/* Botón principal amarillo */
+button[kind="primary"]{
+    background:#FFC400 !important;
+    color:#080808 !important;
+    border-color:#FFC400 !important;
+    font-weight:800 !important;
+}
+
+button[kind="primary"]:hover{
+    background:#FFD12A !important;
+    border-color:#FFD12A !important;
+    color:#080808 !important;
+}
+
+/* Métricas nativas */
+div[data-testid="stMetric"]{
+    background:#0A0A0A;
+    border:1px solid #2B3944;
+    border-radius:9px;
+    padding:10px 12px;
+}
+
+
+/* ===== MOCKUP NEGRO MARITEX · OVERRIDE GLOBAL ===== */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"], .stApp {background:#000000 !important;color:#F5F5F5 !important;}
+[data-testid="stHeader"]{background:#000000 !important;}
+.block-container{background:#000000 !important;}
+[data-testid="stSidebar"]{background:#050505 !important;border-right:1px solid #242424 !important;}
+[data-testid="stSidebar"] *{color:#EAEAEA;}
+.crm-page-head,.crm-kpi,.crm-stage-head,.crm-kanban-card,div[data-testid="stVerticalBlockBorderWrapper"],div[data-testid="stMetric"],details{background:#0B0B0B !important;border-color:#292929 !important;box-shadow:none !important;}
+.crm-page-head{border-left:4px solid #FFC400 !important;}
+.crm-page-head::before{display:none !important;}
+.crm-page-head h1,.crm-page-head .crm-page-title,.crm-section-title,.crm-client-title,.crm-kpi-value,.crm-stage-name,.crm-stage-count,.crm-kanban-client{color:#FFFFFF !important;}
+.crm-page-head p,.crm-section-sub,.crm-client-sub,.crm-kpi-help,.crm-kanban-title,.crm-kanban-meta{color:#A7A7A7 !important;}
+.crm-section-kicker,.crm-money,.crm-kanban-money{color:#FFC400 !important;}
+.stButton>button{background:#101010 !important;border-color:#333333 !important;color:#F2F2F2 !important;}
+.stButton>button[kind="primary"],button[kind="primary"]{background:#FFC400 !important;border-color:#FFC400 !important;color:#090909 !important;}
+[data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea,[data-testid="stNumberInput"] input,[data-testid="stDateInput"] input,[data-baseweb="select"]>div{background:#0B0B0B !important;color:#F5F5F5 !important;border-color:#303030 !important;}
+div[role="radiogroup"]{background:#000 !important;border-bottom:1px solid #262626 !important;}
+div[role="radiogroup"] label:has(input:checked){background:#171300 !important;border-bottom-color:#FFC400 !important;}
+div[data-testid="stDataFrame"]{background:#080808 !important;border-color:#292929 !important;}
+
+
+/* =========================================================
+   TABLA EJECUTIVA · PRINCIPALES CLIENTES
+   ========================================================= */
+.crm-client-table-wrap{
+    width:100%;
+    overflow:hidden;
+    border:1px solid #272727;
+    border-radius:10px;
+    background:#080808;
+}
+.crm-client-table{
+    width:100%;
+    border-collapse:collapse;
+    table-layout:fixed;
+}
+.crm-client-table th{
+    padding:9px 10px;
+    color:#8E969C;
+    background:#0D0D0D;
+    border-bottom:1px solid #2A2A2A;
+    font-size:8px;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.05em;
+    text-align:left;
+    white-space:nowrap;
+}
+.crm-client-table td{
+    padding:10px 10px;
+    color:#EEF1F3;
+    border-bottom:1px solid #202020;
+    font-size:9px;
+    line-height:1.2;
+    vertical-align:middle;
+}
+.crm-client-table tr:last-child td{border-bottom:0;}
+.crm-client-table tbody tr:hover{background:#101010;}
+.crm-client-table .client-name{
+    font-weight:800;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+.crm-client-table .client-rut,
+.crm-client-table .client-seller,
+.crm-client-table .client-date{
+    color:#B9C0C5;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+.crm-client-table .client-money{
+    color:#FFC400;
+    font-weight:900;
+    text-align:right;
+    white-space:nowrap;
+}
+.crm-client-table .client-orders{
+    color:#E7EBEE;
+    text-align:center;
+    white-space:nowrap;
+}
+.crm-client-table th:nth-child(1){width:31%;}
+.crm-client-table th:nth-child(2){width:16%;}
+.crm-client-table th:nth-child(3){width:21%;}
+.crm-client-table th:nth-child(4){width:16%;text-align:right;}
+.crm-client-table th:nth-child(5){width:7%;text-align:center;}
+.crm-client-table th:nth-child(6){width:12%;}
+@media(max-width:900px){
+    .crm-client-table th:nth-child(5),
+    .crm-client-table td:nth-child(5),
+    .crm-client-table th:nth-child(6),
+    .crm-client-table td:nth-child(6){display:none;}
+    .crm-client-table th:nth-child(1){width:36%;}
+    .crm-client-table th:nth-child(2){width:20%;}
+    .crm-client-table th:nth-child(3){width:25%;}
+    .crm-client-table th:nth-child(4){width:19%;}
+}
+
+
+
+/* COMPONENTES NEGROS · SIN AZUL NATIVO STREAMLIT */
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+[data-testid="stDateInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stTextArea"] textarea{
+    background:#070707 !important;
+    border-color:#303030 !important;
+    color:#F7F7F7 !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within{
+    border-color:#FFC400 !important;
+    box-shadow:0 0 0 1px rgba(255,196,0,.18) !important;
+}
+.crm-generic-table-wrap{width:100%;overflow:auto;border:1px solid #2A2A2A;border-radius:10px;background:#050505;margin-top:8px;}
+.crm-generic-table{width:100%;border-collapse:collapse;background:#050505;color:#F5F5F5;}
+.crm-generic-table th{padding:12px;background:#0A0A0A;color:#AEB7BE;border-right:1px solid #252525;border-bottom:1px solid #343434;font-size:10px;font-weight:750;text-align:left;white-space:nowrap;}
+.crm-generic-table td{padding:11px 12px;background:#050505;color:#F2F4F5;border-right:1px solid #202020;border-bottom:1px solid #252525;font-size:10px;}
+.crm-generic-table tbody tr:nth-child(even) td{background:#080808;}
+.crm-generic-table tbody tr:hover td{background:#111006;}
+.crm-generic-table th:last-child,.crm-generic-table td:last-child{border-right:0;}
+.crm-generic-table tbody tr:last-child td{border-bottom:0;}
+.crm-generic-table td.money{color:#FFC400;font-weight:800;text-align:right;}
+.crm-generic-table td.num{text-align:right;font-weight:750;}
+.crm-ranking-table th:nth-child(2),.crm-ranking-table td:nth-child(2),.crm-ranking-table th:nth-child(3),.crm-ranking-table td:nth-child(3){text-align:right;}
+.crm-follow-summary{display:flex;flex-direction:column;gap:16px;padding:16px 4px 4px;}
+.crm-follow-top{display:flex;justify-content:space-between;align-items:center;color:#C8D0D5;font-size:10px;margin-bottom:7px;}
+.crm-follow-top strong{color:#FFF;font-size:12px;}
+.crm-follow-track{height:7px;background:#171717;border:1px solid #282828;border-radius:999px;overflow:hidden;}
+.crm-follow-track i{display:block;height:100%;border-radius:999px;min-width:0;}
+
+/* =========================================================
+   CRM MARITEX V3 · CAMBIO ESTRUCTURAL VISIBLE
+   ========================================================= */
+.crm-page-head{
+    background:
+      radial-gradient(circle at 86% 12%,rgba(255,196,0,.055),transparent 24%),
+      linear-gradient(135deg,#091319 0%,#05090C 70%) !important;
+    border:1px solid #293A45 !important;
+    border-left:4px solid #FFC400 !important;
+    border-radius:10px !important;
+    min-height:90px !important;
+    padding:18px 22px 16px 26px !important;
+}
+.crm-page-head h1{font-size:32px !important;letter-spacing:-.7px !important;}
+.crm-live-pill{background:#071117 !important;border-color:#30434F !important;}
+
+/* KPI principales con identidad propia */
+.crm-kpi.crm-kpi-sales{
+    background:linear-gradient(135deg,#0C2B1F,#08120E 70%,#070B0D) !important;
+    border-color:#1E4937 !important;
+}
+.crm-kpi.crm-kpi-sales::before{background:#2ED17F !important;}
+.crm-kpi.crm-kpi-opps{
+    background:linear-gradient(135deg,#102A44,#091620 70%,#070B0D) !important;
+    border-color:#244C6B !important;
+}
+.crm-kpi.crm-kpi-opps::before{background:#4093FF !important;}
+.crm-kpi.crm-kpi-weighted{
+    background:linear-gradient(135deg,#332047,#160F1E 70%,#070B0D) !important;
+    border-color:#503267 !important;
+}
+.crm-kpi.crm-kpi-weighted::before{background:#B36BFF !important;}
+.crm-kpi.crm-kpi-close{
+    background:linear-gradient(135deg,#3A3009,#171405 70%,#070B0D) !important;
+    border-color:#5C4D0C !important;
+}
+.crm-kpi.crm-kpi-close::before{background:#FFC400 !important;}
+.crm-kpi{
+    min-height:122px !important;
+    padding:15px 16px 13px 19px !important;
+    border-radius:9px !important;
+}
+.crm-kpi-value{font-size:25px !important;}
+
+/* KPI secundarios propios */
+.crm-mini-kpis{
+    display:grid;
+    grid-template-columns:repeat(5,minmax(0,1fr));
+    gap:10px;
+    margin:4px 0 14px;
+}
+.crm-mini-kpi{
+    min-height:88px;
+    display:flex;
+    align-items:center;
+    gap:11px;
+    padding:12px 13px;
+    border:1px solid #283943;
+    border-radius:9px;
+    background:linear-gradient(145deg,#0A1318,#060A0D);
+}
+.crm-mini-icon{
+    width:36px;height:36px;flex:0 0 36px;
+    display:flex;align-items:center;justify-content:center;
+    border-radius:8px;
+    font-size:18px;font-weight:900;
+    background:#101A20;border:1px solid #2D404B;color:#FFC400;
+}
+.crm-mini-kpi span{
+    display:block;color:#AAB7BF;font-size:8px;font-weight:800;
+    text-transform:uppercase;letter-spacing:.035em;
+}
+.crm-mini-kpi strong{
+    display:block;color:#FFF;font-size:20px;line-height:1;margin-top:6px;
+}
+.crm-mini-kpi small{
+    display:block;color:#71848F;font-size:7.5px;margin-top:5px;
+}
+.crm-mini-clients .crm-mini-icon{color:#57A7FF;background:#0B1D2A;border-color:#24445A;}
+.crm-mini-opps .crm-mini-icon{color:#B97AFF;background:#1D1228;border-color:#49305A;}
+.crm-mini-pending .crm-mini-icon{color:#FFC400;background:#211B05;border-color:#574700;}
+.crm-mini-overdue .crm-mini-icon{color:#FF6860;background:#27100F;border-color:#5A2926;}
+.crm-mini-risk .crm-mini-icon{color:#FF9A4D;background:#26160B;border-color:#59341B;}
+
+/* Tres paneles ejecutivos más parecidos a Integración ERP */
+div[data-testid="stVerticalBlockBorderWrapper"]{
+    background:linear-gradient(180deg,#081116 0%,#05090C 100%) !important;
+    border:1px solid #293A45 !important;
+    border-radius:9px !important;
+}
+.crm-empty{
+    min-height:188px !important;
+    background:#050A0D !important;
+    border:1px dashed #30424D !important;
+    border-radius:8px !important;
+}
+.crm-section-title{font-size:17px !important;}
+.crm-section-kicker{font-size:7.5px !important;}
+
+/* Tabla cartera */
+.crm-client-table-wrap{
+    border-color:#293A45 !important;
+    background:#05090C !important;
+}
+.crm-client-table th{background:#0A1318 !important;}
+.crm-client-table td{background:#05090C !important;}
+.crm-client-table tbody tr:hover td{background:#0C171C !important;}
+
+@media(max-width:1100px){
+    .crm-mini-kpis{grid-template-columns:repeat(2,minmax(0,1fr));}
+}
+@media(max-width:700px){
+    .crm-mini-kpis{grid-template-columns:1fr;}
+}
+
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# HELPERS
+
+
+def _help_icon(message: str) -> str:
+    """Helper visual Maritex con tooltip explicativo."""
+    safe = (
+        str(message)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+    return (
+        '<span class="crm-help">?'
+        f'<span class="crm-help-tip">{safe}</span>'
+        '</span>'
+    )
+
+
+def _title_with_help(title: str, help_text: str, css_class: str = "crm-section-title") -> str:
+    return (
+        '<div class="crm-title-line">'
+        f'<div class="{css_class}">{title}</div>'
+        f'{_help_icon(help_text)}'
+        '</div>'
+    )
+
+
+# ============================================================
+
+def _safe_text(
+    value: Any,
+    default: str = "-",
+) -> str:
+    if value is None:
+        return default
+
+    text = str(value).strip()
+
+    if not text:
+        return default
+
+    if text.lower() in {
+        "nan",
+        "none",
+        "nat",
+    }:
+        return default
+
+    return text
+
+
+def _money(
+    value: Any,
+) -> str:
+    try:
+        number = float(value or 0)
+    except Exception:
+        number = 0
+
+    return (
+        f"${number:,.0f}"
+        .replace(",", ".")
+    )
+
+
+def _number(
+    value: Any,
+) -> float:
+    number = pd.to_numeric(
+        value,
+        errors="coerce",
+    )
+
+    if pd.isna(number):
+        return 0.0
+
+    return float(number)
+
+
+def _normalize_name(
+    value: Any,
+) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+        .replace(".", "")
+    )
+
+
+def _find_column(
+    df: pd.DataFrame,
+    candidates: list[str],
+) -> str | None:
+    if df is None or df.empty:
+        return None
+
+    normalized = {
+        _normalize_name(column): column
+        for column in df.columns
+    }
+
+    # Coincidencia exacta
+    for candidate in candidates:
+        key = _normalize_name(candidate)
+
+        if key in normalized:
+            return normalized[key]
+
+    # Coincidencia parcial
+    for candidate in candidates:
+        key = _normalize_name(candidate)
+
+        for normalized_column, original_column in normalized.items():
+            if (
+                key in normalized_column
+                or normalized_column in key
+            ):
+                return original_column
+
+    return None
+
+
+def _db_rows_to_frame(
+    rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(rows)
+
+    for column in (
+        "estimated_amount",
+        "probability",
+    ):
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(
+                frame[column],
+                errors="coerce",
+            ).fillna(0)
+
+    return frame
+
+
+def _opportunity_display_frame(
+    rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    frame = _db_rows_to_frame(rows)
+
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "ID",
+                "Cliente",
+                "RUT",
+                "Oportunidad",
+                "Monto",
+                "Etapa",
+                "Probabilidad",
+                "Estado",
+                "Vendedor",
+                "Cierre estimado",
+                "Próxima acción",
+                "Fecha próxima acción",
+            ]
+        )
+
+    display = pd.DataFrame(
+        {
+            "ID": frame["id"],
+            "Cliente": frame["client_name"],
+            "RUT": frame["client_rut"].fillna("-"),
+            "Oportunidad": frame["title"],
+            "Monto": frame["estimated_amount"],
+            "Etapa": frame["stage"],
+            "Probabilidad": frame["probability"],
+            "Estado": frame["status"],
+            "Vendedor": frame["seller"].fillna("-").map(_seller_name),
+            "Cierre estimado": frame["expected_close_date"],
+            "Próxima acción": frame["next_action"].fillna("-"),
+            "Fecha próxima acción": frame["next_action_date"],
+        }
+    )
+
+    for column in (
+        "Cierre estimado",
+        "Fecha próxima acción",
+    ):
+        display[column] = pd.to_datetime(
+            display[column],
+            errors="coerce",
+        ).dt.strftime("%d-%m-%Y")
+
+    return display
+
+
+
+
+def _followup_display_frame(
+    rows: list[dict[str, Any]],
+) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "ID",
+                "Fecha",
+                "Cliente",
+                "RUT",
+                "Oportunidad",
+                "Tipo",
+                "Asunto",
+                "Responsable",
+                "Detalle",
+                "Próximo seguimiento",
+                "Estado",
+            ]
+        )
+
+    frame = pd.DataFrame(rows)
+
+    display = pd.DataFrame(
+        {
+            "ID": frame["id"],
+            "Fecha": frame["followup_date"],
+            "Cliente": frame["client_name"].fillna("-"),
+            "RUT": frame["client_rut"].fillna("-"),
+            "Oportunidad": frame["opportunity_id"].fillna("-"),
+            "Tipo": frame["followup_type"].fillna("-"),
+            "Asunto": frame["subject"].fillna("-"),
+            "Responsable": frame["seller"].fillna("-").map(_seller_name),
+            "Detalle": frame["notes"].fillna("-"),
+            "Próximo seguimiento": frame["next_followup_date"],
+            "Estado": frame["completed"].map(
+                {
+                    True: "Completado",
+                    False: "Pendiente",
+                }
+            ),
+        }
+    )
+
+    display["Fecha"] = pd.to_datetime(
+        display["Fecha"],
+        errors="coerce",
+    ).dt.strftime("%d-%m-%Y %H:%M")
+
+    display["Próximo seguimiento"] = pd.to_datetime(
+        display["Próximo seguimiento"],
+        errors="coerce",
+    ).dt.strftime("%d-%m-%Y")
+
+    return display
+
+
+def _followup_opportunity_label(
+    opportunity: dict[str, Any],
+) -> str:
+    return (
+        f"#{opportunity.get('id')} · "
+        f"{_safe_text(opportunity.get('client_name'))} · "
+        f"{_safe_text(opportunity.get('title'))}"
+    )
+
+
+
+
+def _seller_options_from_sales(
+    sales_df: pd.DataFrame,
+    seller_col: str | None,
+) -> list[str]:
+    if (
+        sales_df is None
+        or sales_df.empty
+        or not seller_col
+        or seller_col not in sales_df.columns
+    ):
+        return []
+
+    options = set()
+
+    for value in sales_df[seller_col].dropna():
+        code = _normalize_seller_code(value)
+
+        if (
+            code
+            and code not in EXCLUDED_SELLERS
+        ):
+            options.add(code)
+
+    return sorted(
+        options,
+        key=lambda code: (
+            _seller_name(code).upper(),
+            code,
+        ),
+    )
+
+
+def _filter_sales_by_seller(
+    sales_df: pd.DataFrame,
+    seller_col: str | None,
+    seller: str,
+) -> pd.DataFrame:
+    if sales_df is None or sales_df.empty:
+        return pd.DataFrame()
+
+    if (
+        not seller
+        or seller == "Todos"
+        or not seller_col
+        or seller_col not in sales_df.columns
+    ):
+        return sales_df.copy()
+
+    seller_code = _normalize_seller_code(seller)
+
+    codes = sales_df[seller_col].map(
+        _normalize_seller_code
+    )
+
+    return sales_df[
+        codes == seller_code
+    ].copy()
+
+
+def _seller_options_from_clients(
+    clients: pd.DataFrame,
+) -> list[str]:
+    if clients is None or clients.empty or "Vendedor" not in clients.columns:
+        return []
+
+    options = set()
+
+    for value in clients["Vendedor"].dropna().astype(str):
+        code = _normalize_seller_code(value)
+
+        if (
+            code
+            and code != "-"
+            and code not in EXCLUDED_SELLERS
+        ):
+            options.add(code)
+
+    return sorted(
+        options,
+        key=lambda code: (
+            _seller_name(code).upper(),
+            code,
+        ),
+    )
+
+
+def _filter_clients_by_seller(
+
+    clients: pd.DataFrame,
+    seller: str,
+) -> pd.DataFrame:
+    if clients is None or clients.empty:
+        return pd.DataFrame()
+
+    if not seller or seller == "Todos":
+        return clients.copy()
+
+    seller_code = _normalize_seller_code(seller)
+
+    seller_codes = clients["Vendedor"].map(
+        _normalize_seller_code
+    )
+
+    return clients[
+        seller_codes == seller_code
+    ].copy()
+
+
+def _get_active_seller() -> str:
+    return str(
+        st.session_state.get(
+            "crm_active_seller",
+            "Todos",
+        )
+        or "Todos"
+    )
+
+
+
+SELLER_NAMES = {
+    "001": "VENDEDOR 1",
+    "01": "JEFE DE VENTAS CM",
+    "02": "JEFE DE VENTAS GC",
+    "03": "GC1-DANIEL ALVARADO",
+    "04": "ROXANA VALENCIA",
+    "05": "GRACIELA SANTANDER",
+    "06": "CLAUDIA LOPEZ",
+    "07": "LORENA OPAZO",
+    "08": "MARIO BRITO",
+    "09": "XIMENA CROVETTO",
+    "10": "REG1",
+    "11": "CAROLINA CROCKETT",
+    "12": "JOSE GONZALEZ",
+    "13": "PERSONAL",
+    "14": "REGIONES SUR",
+    "15": "VENDEDOR ECOMMERS",
+    "16": "MATIAS CHOMALI",
+    "17": "ECOMMERS",
+    "30": "VENDEDOR ECOMMERS B2C",
+    "31": "VENDEDOR ECOMMERS NOLK",
+    "32": "VENDEDOR ECOMMERS",
+    "33": "MKP FALABELLA",
+    "34": "MKP MERCADO LIBRE",
+    "35": "MKP - PARIS",
+    "42": "JEFE LOCAL",
+    "43": "SEBASTIAN ROCCO",
+    "44": "MACARENA DE LA ORDEN",
+    "45": "MARIELY ROSALES",
+    "46": "MELANY VARGAS",
+    "47": "MARIA BERNARD",
+    "48": "EURO QUIÑONEZ",
+    "49": "FRANCISCO PEREZ",
+    "50": "GINO MATUS",
+    "51": "NELSON SAN MARTIN",
+    "54": "JOHANA OBREQUE",
+    "60": "JOSE LUIS ROLANO",
+    "70": "ANDRES ESPINOZA",
+}
+
+EXCLUDED_SELLERS = {"36", "52", "53"}
+
+
+def _normalize_seller_code(value: Any) -> str:
+    code = _safe_text(value, "").strip()
+
+    if not code:
+        return ""
+
+    # Excel a veces entrega códigos numéricos como "6.0"
+    if code.endswith(".0"):
+        code = code[:-2]
+
+    # Mantener 001 como código especial y normalizar el resto a 2 dígitos.
+    if code == "001":
+        return "001"
+
+    if code.isdigit():
+        code = code.zfill(2)
+
+    return code
+
+
+def _seller_name(value: Any) -> str:
+    code = _normalize_seller_code(value)
+
+    if not code:
+        return "-"
+
+    return SELLER_NAMES.get(code, code)
+
+
+def _seller_label(value: Any) -> str:
+    code = _normalize_seller_code(value)
+
+    if not code:
+        return "Sin vendedor"
+
+    name = SELLER_NAMES.get(code)
+
+    if not name:
+        return code
+
+    return name
+
+
+def _is_excluded_seller(value: Any) -> bool:
+    return _normalize_seller_code(value) in EXCLUDED_SELLERS
+
+
+def _display_seller_series(series: pd.Series) -> pd.Series:
+    return series.map(_seller_name)
+
+
+def _filter_excluded_db_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if not _is_excluded_seller(row.get("seller"))
+    ]
+
+
+
+def _parse_sales_dates(
+    values: pd.Series,
+) -> pd.Series:
+    """
+    Convierte fechas ERP sin asumir siempre DD/MM o MM/DD.
+
+    Si las fechas son ambiguas (ej. 09/01/2026), prueba ambas
+    interpretaciones y selecciona la que genera el rango temporal
+    más compacto. Esto evita interpretar un archivo de septiembre
+    como enero-marzo.
+    """
+    if values is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    raw = values.copy()
+
+    # Fechas Excel / datetime ya reconocidas.
+    if pd.api.types.is_datetime64_any_dtype(raw):
+        return pd.to_datetime(raw, errors="coerce")
+
+    # Intento día/mes.
+    day_first = pd.to_datetime(
+        raw,
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    # Intento mes/día.
+    month_first = pd.to_datetime(
+        raw,
+        errors="coerce",
+        dayfirst=False,
+    )
+
+    def _score(parsed: pd.Series) -> tuple[int, int, int]:
+        valid = parsed.dropna()
+
+        if valid.empty:
+            return (10**9, 10**9, 10**9)
+
+        # Menor rango = interpretación más probable para un archivo
+        # operativo que contiene un período específico.
+        span_days = int(
+            (valid.max().normalize() - valid.min().normalize()).days
+        )
+
+        distinct_months = int(
+            valid.dt.to_period("M").nunique()
+        )
+
+        invalid_count = int(parsed.isna().sum())
+
+        return (
+            invalid_count,
+            distinct_months,
+            span_days,
+        )
+
+    score_day = _score(day_first)
+    score_month = _score(month_first)
+
+    if score_month < score_day:
+        return month_first
+
+    return day_first
+
+
+def _sales_period_from_df(
+    sales_df: pd.DataFrame,
+    detected_columns: dict[str, str] | None = None,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    """Obtiene el rango REAL de fechas contenido en el archivo ERP Ventas."""
+    if sales_df is None or sales_df.empty:
+        return None, None
+
+    # services/erp_sales normaliza la fecha real en Fecha_dt.
+    if "Fecha_dt" in sales_df.columns:
+        dates = pd.to_datetime(
+            sales_df["Fecha_dt"],
+            errors="coerce",
+        ).dropna()
+
+        if not dates.empty:
+            return (
+                dates.min().normalize(),
+                dates.max().normalize(),
+            )
+
+    date_col = None
+
+    if detected_columns:
+        date_col = detected_columns.get("date")
+
+    if not date_col:
+        candidates = [
+            "Fecha",
+            "FECHA",
+            "fecha",
+            "Fecha Documento",
+            "FechaDocumento",
+        ]
+
+        for candidate in candidates:
+            if candidate in sales_df.columns:
+                date_col = candidate
+                break
+
+    if not date_col or date_col not in sales_df.columns:
+        return None, None
+
+    dates = _parse_sales_dates(
+        sales_df[date_col]
+    ).dropna()
+
+    if dates.empty:
+        return None, None
+
+    return (
+        dates.min().normalize(),
+        dates.max().normalize(),
+    )
+
+
+def _period_label() -> str:
+    start = st.session_state.get("crm_sales_period_start")
+    end = st.session_state.get("crm_sales_period_end")
+
+    if start is None or end is None:
+        return "Período disponible"
+
+    start = pd.to_datetime(start, errors="coerce")
+    end = pd.to_datetime(end, errors="coerce")
+
+    if pd.isna(start) or pd.isna(end):
+        return "Período disponible"
+
+    if start.date() == end.date():
+        return start.strftime("%d-%m-%Y")
+
+    return f"{start.strftime('%d-%m-%Y')} al {end.strftime('%d-%m-%Y')}"
+
+
+
+def _go_to_crm_section(section: str) -> None:
+    """Solicita una navegación CRM para procesarla antes de crear el widget crm_section."""
+    st.session_state["crm_requested_section"] = section
+
+
+def _open_client_360(client_name: str, client_rut: str = "") -> None:
+    """Abre Ficha 360 desde Clientes sin modificar directamente el widget crm_section."""
+    st.session_state["crm360_preselected_client"] = client_name
+    st.session_state["crm360_preselected_rut"] = client_rut
+    st.session_state["crm360_return_to_clients"] = True
+    st.session_state["crm_requested_section"] = "Ficha 360°"
+
+
+def _update_pipeline_opportunity(
+    opportunity_id: int,
+    **changes: Any,
+) -> None:
+    update_opportunity(
+        opportunity_id,
+        **changes,
+    )
+
+
+# ============================================================
+# DETECCIÓN DE COLUMNAS ERP VENTAS
+# ============================================================
+
+def _detect_sales_columns(
+    sales_df: pd.DataFrame,
+) -> dict:
+    return {
+        "rut": _find_column(
+            sales_df,
+            [
+                "CodigoLegal",
+                "CódigoLegal",
+                "Codigo Legal",
+                "Código Legal",
+                "CodLegal",
+                "rut cliente",
+                "rutcliente",
+                "rut",
+                "cliente rut",
+                "cod cliente",
+                "codigo cliente",
+            ],
+        ),
+
+        "client": _find_column(
+            sales_df,
+            [
+                "RazonSocial",
+                "RazónSocial",
+                "razon social",
+                "razón social",
+                "cliente",
+                "nombre cliente",
+                "nombre",
+                "glosa cliente",
+            ],
+        ),
+
+        "seller": _find_column(
+            sales_df,
+            [
+                "vendedor",
+                "nombre vendedor",
+                "ejecutivo",
+                "seller",
+            ],
+        ),
+
+        "date": _find_column(
+            sales_df,
+            [
+                "fecha",
+                "fecha documento",
+                "fecha emision",
+                "fecha emisión",
+                "fec emision",
+            ],
+        ),
+
+        "amount": _find_column(
+            sales_df,
+            [
+                "TotalIngreso",
+                "total ingreso",
+                "total",
+                "venta",
+                "monto",
+                "monto neto",
+                "neto",
+                "total documento",
+                "valor venta",
+            ],
+        ),
+
+        "document": _find_column(
+            sales_df,
+            [
+                "numero documento",
+                "nro documento",
+                "documento",
+                "folio",
+                "numero",
+            ],
+        ),
+
+        "product": _find_column(
+            sales_df,
+            [
+                "producto",
+                "descripcion producto",
+                "descripción producto",
+                "descripcion",
+                "sku",
+            ],
+        ),
+    }
+
+
+# ============================================================
+# PREPARAR CLIENTES
+# ============================================================
+
+def _prepare_clients(
+    sales_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    if (
+        sales_df is None
+        or sales_df.empty
+    ):
+        return pd.DataFrame(), {}
+
+    columns = _detect_sales_columns(
+        sales_df
+    )
+
+    client_col = columns.get("client")
+    rut_col = columns.get("rut")
+    seller_col = columns.get("seller")
+    date_col = columns.get("date")
+    amount_col = columns.get("amount")
+    document_col = columns.get("document")
+
+    if not client_col and not rut_col:
+        return pd.DataFrame(), columns
+
+    work = sales_df.copy()
+
+    # --------------------------------------------------------
+    # Identificador cliente
+    # --------------------------------------------------------
+
+    if rut_col:
+        work["_crm_rut"] = (
+            work[rut_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        work["_crm_rut"] = ""
+
+    if client_col:
+        work["_crm_cliente"] = (
+            work[client_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        work["_crm_cliente"] = ""
+
+    work["_crm_key"] = work["_crm_rut"]
+
+    empty_rut = (
+        work["_crm_key"]
+        .eq("")
+    )
+
+    work.loc[
+        empty_rut,
+        "_crm_key",
+    ] = work.loc[
+        empty_rut,
+        "_crm_cliente",
+    ]
+
+    work = work[
+        work["_crm_key"].astype(str).str.strip() != ""
+    ].copy()
+
+    if work.empty:
+        return pd.DataFrame(), columns
+
+    # --------------------------------------------------------
+    # Fecha
+    # --------------------------------------------------------
+
+    if "Fecha_dt" in work.columns:
+        work["_crm_fecha"] = pd.to_datetime(
+            work["Fecha_dt"],
+            errors="coerce",
+        )
+    elif date_col:
+        work["_crm_fecha"] = _parse_sales_dates(
+            work[date_col]
+        )
+    else:
+        work["_crm_fecha"] = pd.NaT
+
+    # --------------------------------------------------------
+    # Venta comercial OFICIAL
+    # --------------------------------------------------------
+    # Usa exactamente el mismo signed_amount() compartido por
+    # Inicio y Resumen Ejecutivo.
+    if (
+        "VentaMonto_num" in work.columns
+        and "Grupo comercial" in work.columns
+    ):
+        work["_crm_venta"] = signed_amount(
+            work,
+            no_vat=False,
+        )
+    elif amount_col:
+        work["_crm_venta"] = pd.to_numeric(
+            work[amount_col],
+            errors="coerce",
+        ).fillna(0)
+    else:
+        work["_crm_venta"] = 0.0
+
+    # --------------------------------------------------------
+    # Vendedor
+    # --------------------------------------------------------
+
+    if seller_col:
+        work["_crm_vendedor"] = (
+            work[seller_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        work["_crm_vendedor"] = ""
+
+    # --------------------------------------------------------
+    # Nº pedidos/documentos
+    # --------------------------------------------------------
+
+    if document_col:
+        work["_crm_documento"] = (
+            work[document_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        work["_crm_documento"] = ""
+
+    # --------------------------------------------------------
+    # Ventas del período
+    # --------------------------------------------------------
+    # Se suman las líneas comerciales normalizadas:
+    # Factura + Boleta - Nota de crédito.
+    # Así queda alineado con el Resumen Ejecutivo.
+    work["_crm_venta_periodo"] = work["_crm_venta"]
+
+    # --------------------------------------------------------
+    # Agrupar
+    # --------------------------------------------------------
+
+    aggregation = {
+        "Cliente": (
+            "_crm_cliente",
+            lambda values: next(
+                (
+                    str(v).strip()
+                    for v in values
+                    if str(v).strip()
+                ),
+                "-",
+            ),
+        ),
+
+        "RUT": (
+            "_crm_rut",
+            lambda values: next(
+                (
+                    str(v).strip()
+                    for v in values
+                    if str(v).strip()
+                ),
+                "-",
+            ),
+        ),
+
+        "Vendedor": (
+            "_crm_vendedor",
+            lambda values: next(
+                (
+                    str(v).strip()
+                    for v in values
+                    if str(v).strip()
+                ),
+                "-",
+            ),
+        ),
+
+        "Última compra": (
+            "_crm_fecha",
+            "max",
+        ),
+
+        "Ventas acumuladas": (
+            "_crm_venta",
+            "sum",
+        ),
+
+        "Ventas del período": (
+            "_crm_venta_periodo",
+            "sum",
+        ),
+    }
+
+    if document_col:
+        aggregation["Pedidos"] = (
+            "_crm_documento",
+            "nunique",
+        )
+    else:
+        aggregation["Pedidos"] = (
+            "_crm_key",
+            "size",
+        )
+
+    clients = (
+        work
+        .groupby(
+            "_crm_key",
+            dropna=False,
+        )
+        .agg(
+            **aggregation
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "_crm_key": "_client_key",
+            }
+        )
+    )
+
+    clients["Ventas acumuladas"] = (
+        pd.to_numeric(
+            clients["Ventas acumuladas"],
+            errors="coerce",
+        )
+        .fillna(0)
+    )
+
+    clients["Ventas del período"] = (
+        pd.to_numeric(
+            clients["Ventas del período"],
+            errors="coerce",
+        )
+        .fillna(0)
+    )
+
+    clients["Pedidos"] = (
+        pd.to_numeric(
+            clients["Pedidos"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    clients = clients.sort_values(
+        "Ventas del período",
+        ascending=False,
+    ).reset_index(drop=True)
+
+    return clients, columns
+
+
+# ============================================================
+# RESUMEN
+# ============================================================
+
+def _render_summary(
+    clients: pd.DataFrame,
+    sales_view: pd.DataFrame,
+) -> None:
+    if clients.empty:
+        st.info("No existen datos de clientes disponibles.")
+        return
+
+    active_seller = _get_active_seller()
+    seller_title = (
+        "Todos los vendedores"
+        if active_seller == "Todos"
+        else _seller_name(active_seller)
+    )
+
+    # --------------------------------------------------------
+    # Datos base ERP · SERVICIO COMERCIAL ÚNICO
+    # --------------------------------------------------------
+    official = commercial_metrics(
+        sales_view,
+        no_vat=False,
+    )
+
+    total_clients = int(
+        official.get("clients") or 0
+    )
+    total_sales = float(
+        official.get("net") or 0
+    )
+    average_sales = (
+        total_sales / total_clients
+        if total_clients
+        else 0
+    )
+
+    dates = pd.to_datetime(
+        clients["Última compra"],
+        errors="coerce",
+    )
+    valid_dates = dates.dropna()
+
+    inactive_clients = 0
+    reference_date = None
+
+    if not valid_dates.empty:
+        reference_date = valid_dates.max()
+        inactive_limit = reference_date - timedelta(days=90)
+        inactive_clients = int(
+            (
+                dates.notna()
+                & (dates < inactive_limit)
+            ).sum()
+        )
+
+    inactive_pct = (
+        inactive_clients / total_clients * 100
+        if total_clients
+        else 0
+    )
+
+    # --------------------------------------------------------
+    # Datos CRM PostgreSQL
+    # --------------------------------------------------------
+    seller_filter = (
+        active_seller
+        if active_seller != "Todos"
+        else None
+    )
+
+    try:
+        opportunities = list_opportunities(
+            seller=seller_filter,
+            limit=2000,
+        )
+        opportunities = _filter_excluded_db_rows(
+            opportunities
+        )
+
+        followups = list_followups(
+            seller=seller_filter,
+            limit=2000,
+        )
+        followups = _filter_excluded_db_rows(
+            followups
+        )
+
+    except Exception:
+        opportunities = []
+        followups = []
+
+    open_opps = [
+        row
+        for row in opportunities
+        if _safe_text(
+            row.get("status"),
+            "",
+        ) == "Abierta"
+    ]
+
+    won_opps = [
+        row
+        for row in opportunities
+        if _safe_text(
+            row.get("status"),
+            "",
+        ) == "Ganada"
+    ]
+
+    lost_opps = [
+        row
+        for row in opportunities
+        if _safe_text(
+            row.get("status"),
+            "",
+        ) == "Perdida"
+    ]
+
+    total_open_amount = sum(
+        float(
+            row.get("estimated_amount")
+            or 0
+        )
+        for row in open_opps
+    )
+
+    weighted_amount = sum(
+        float(
+            row.get("estimated_amount")
+            or 0
+        )
+        * float(
+            row.get("probability")
+            or 0
+        )
+        / 100
+        for row in open_opps
+    )
+
+    closed_count = len(won_opps) + len(lost_opps)
+
+    close_rate = (
+        len(won_opps) / closed_count * 100
+        if closed_count
+        else 0
+    )
+
+    pending_followups = [
+        row
+        for row in followups
+        if not bool(
+            row.get("completed")
+        )
+    ]
+
+    today = pd.Timestamp.today().normalize()
+
+    overdue_followups = []
+    today_followups = []
+
+    for item in pending_followups:
+        next_dt = pd.to_datetime(
+            item.get(
+                "next_followup_date"
+            ),
+            errors="coerce",
+        )
+
+        if pd.isna(next_dt):
+            continue
+
+        next_day = next_dt.normalize()
+
+        if next_day < today:
+            overdue_followups.append(
+                item
+            )
+        elif next_day == today:
+            today_followups.append(
+                item
+            )
+
+    # --------------------------------------------------------
+    # Cabecera ejecutiva
+    # --------------------------------------------------------
+    st.markdown(
+        f"""
+<div class="crm-section-kicker">RESUMEN EJECUTIVO COMERCIAL</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Visión gerencial</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Consolida ventas ERP, cartera, oportunidades y actividad comercial.
+            El contenido cambia automáticamente según el vendedor seleccionado.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Módulo: <strong>{seller_title}</strong> ·
+    Ventas ERP: <strong>{_period_label()}</strong>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --------------------------------------------------------
+    # KPI principales
+    # --------------------------------------------------------
+    kpi_html = (
+        f'<div class="crm-kpis">'
+        f'<div class="crm-kpi crm-kpi-sales">'
+        f'<div class="crm-kpi-label">'
+        f'Ventas del período'
+        f'<span class="crm-help">?'
+        f'<span class="crm-help-tip">'
+        f'Venta comercial del ERP: Facturas + Boletas - Notas de crédito, usando VentaMonto_num.'
+        f'</span></span></div>'
+        f'<div class="crm-kpi-value">{_money(total_sales)}</div>'
+        f'<div class="crm-kpi-help">Período: {_period_label()}</div>'
+        f'</div>'
+
+        f'<div class="crm-kpi crm-kpi-opps">'
+        f'<div class="crm-kpi-label">'
+        f'Monto oportunidades'
+        f'<span class="crm-help">?'
+        f'<span class="crm-help-tip">'
+        f'Valor total estimado de las oportunidades que continúan abiertas.'
+        f'</span></span></div>'
+        f'<div class="crm-kpi-value">{_money(total_open_amount)}</div>'
+        f'<div class="crm-kpi-help">Negocios activos</div>'
+        f'</div>'
+
+        f'<div class="crm-kpi crm-kpi-weighted">'
+        f'<div class="crm-kpi-label">'
+        f'Monto ponderado'
+        f'<span class="crm-help">?'
+        f'<span class="crm-help-tip">'
+        f'Monto de cada oportunidad multiplicado por su probabilidad de cierre.'
+        f'</span></span></div>'
+        f'<div class="crm-kpi-value">{_money(weighted_amount)}</div>'
+        f'<div class="crm-kpi-help">Valor esperado</div>'
+        f'</div>'
+
+        f'<div class="crm-kpi crm-kpi-close">'
+        f'<div class="crm-kpi-label">'
+        f'Tasa de cierre'
+        f'<span class="crm-help">?'
+        f'<span class="crm-help-tip">'
+        f'Porcentaje de oportunidades ganadas sobre el total de oportunidades ya cerradas.'
+        f'</span></span></div>'
+        f'<div class="crm-kpi-value">{close_rate:.1f}%</div>'
+        f'<div class="crm-kpi-help">{len(won_opps)} ganadas · {len(lost_opps)} perdidas</div>'
+        f'</div>'
+        f'</div>'
+    )
+
+    st.markdown(
+        kpi_html,
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        f"Ventas filtradas por vendedor antes de agrupar clientes, usando la misma base comercial del Resumen Ejecutivo · "
+        f"Período detectado: {_period_label()}"
+    )
+
+    # --------------------------------------------------------
+    # KPI secundarios
+    # --------------------------------------------------------
+    secondary_kpis_html = (
+        '<div class="crm-mini-kpis">'
+        f'<div class="crm-mini-kpi crm-mini-clients"><div class="crm-mini-icon">◎</div><div><span>Clientes</span><strong>{total_clients}</strong><small>Cartera comercial</small></div></div>'
+        f'<div class="crm-mini-kpi crm-mini-opps"><div class="crm-mini-icon">◇</div><div><span>Oportunidades abiertas</span><strong>{len(open_opps)}</strong><small>Negocios activos</small></div></div>'
+        f'<div class="crm-mini-kpi crm-mini-pending"><div class="crm-mini-icon">✓</div><div><span>Seguimientos pendientes</span><strong>{len(pending_followups)}</strong><small>Acciones por gestionar</small></div></div>'
+        f'<div class="crm-mini-kpi crm-mini-overdue"><div class="crm-mini-icon">!</div><div><span>Seguimientos vencidos</span><strong>{len(overdue_followups)}</strong><small>Requieren atención</small></div></div>'
+        f'<div class="crm-mini-kpi crm-mini-risk"><div class="crm-mini-icon">↻</div><div><span>Sin compra +90 días</span><strong>{inactive_clients}</strong><small>Riesgo comercial</small></div></div>'
+        '</div>'
+    )
+    st.markdown(secondary_kpis_html, unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # --------------------------------------------------------
+    # Primera fila gerencial
+    # --------------------------------------------------------
+    left, center, right = st.columns(
+        [1.3, 1.0, 1.0],
+        gap="medium",
+    )
+
+    with left:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">CARTERA</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Principales clientes</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Ranking de clientes según las ventas contenidas en el período real disponible en ERP Ventas.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Clientes de mayor facturación del período.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            top_clients = (
+                clients
+                .sort_values(
+                    "Ventas del período",
+                    ascending=False,
+                )
+                .head(8)
+                .copy()
+            )
+
+            top_display = top_clients[
+                [
+                    "Cliente",
+                    "RUT",
+                    "Vendedor",
+                    "Ventas del período",
+                    "Pedidos",
+                    "Última compra",
+                ]
+            ].copy()
+
+            top_display["Vendedor"] = (
+                top_display["Vendedor"]
+                .map(_seller_name)
+            )
+
+            top_display["Última compra"] = (
+                pd.to_datetime(
+                    top_display[
+                        "Última compra"
+                    ],
+                    errors="coerce",
+                )
+                .dt.strftime(
+                    "%d-%m-%Y"
+                )
+            )
+
+            rows_html = []
+            for _, row in top_display.iterrows():
+                client = escape(_safe_text(row.get("Cliente"), "-"))
+                rut = escape(_safe_text(row.get("RUT"), "-"))
+                seller = escape(_safe_text(row.get("Vendedor"), "-"))
+                amount = _money(_number(row.get("Ventas del período")))
+                orders = int(_number(row.get("Pedidos")))
+                last = escape(_safe_text(row.get("Última compra"), "-"))
+                rows_html.append(
+                    '<tr>'
+                    f'<td class="client-name" title="{client}">{client}</td>'
+                    f'<td class="client-rut">{rut}</td>'
+                    f'<td class="client-seller" title="{seller}">{seller}</td>'
+                    f'<td class="client-money">{amount}</td>'
+                    f'<td class="client-orders">{orders}</td>'
+                    f'<td class="client-date">{last}</td>'
+                    '</tr>'
+                )
+
+            st.markdown(
+                '<div class="crm-client-table-wrap">'
+                '<table class="crm-client-table">'
+                '<thead><tr>'
+                '<th>Cliente</th><th>RUT</th><th>Vendedor</th>'
+                '<th>Ventas</th><th>Docs.</th><th>Última compra</th>'
+                '</tr></thead><tbody>'
+                + ''.join(rows_html) +
+                '</tbody></table></div>',
+                unsafe_allow_html=True,
+            )
+
+    with center:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">TUBERÍA</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Oportunidades por etapa</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Distribución de las oportunidades abiertas según su
+            etapa actual dentro del proceso comercial.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Cantidad de negocios activos.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            stage_rows = []
+
+            for stage in CRM_STAGES:
+                stage_items = [
+                    row
+                    for row in open_opps
+                    if _safe_text(
+                        row.get("stage"),
+                        "",
+                    ) == stage
+                ]
+
+                stage_rows.append(
+                    {
+                        "Etapa": stage,
+                        "Oportunidades": len(
+                            stage_items
+                        ),
+                        "Monto": sum(
+                            float(
+                                row.get(
+                                    "estimated_amount"
+                                )
+                                or 0
+                            )
+                            for row in stage_items
+                        ),
+                    }
+                )
+
+            stage_df = pd.DataFrame(
+                stage_rows
+            )
+
+            if (
+                stage_df.empty
+                or stage_df[
+                    "Oportunidades"
+                ].sum() == 0
+            ):
+                st.markdown(
+                    """
+<div class="crm-empty">
+    <strong>Sin oportunidades abiertas</strong>
+    <span>No existen negocios activos para este módulo.</span>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.bar_chart(
+                    stage_df.set_index(
+                        "Etapa"
+                    )[
+                        "Oportunidades"
+                    ],
+                    use_container_width=True,
+                    height=255,
+                )
+
+                st.dataframe(
+                    stage_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=150,
+                    column_config={
+                        "Monto":
+                        st.column_config.NumberColumn(
+                            "Monto",
+                            format="$ %.0f",
+                        )
+                    },
+                )
+
+    with right:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">ACTIVIDAD</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Próximas acciones</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Próximas llamadas, correos, reuniones, tareas y otros
+            seguimientos comerciales todavía pendientes.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Agenda comercial inmediata.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            sorted_followups = sorted(
+                pending_followups,
+                key=lambda row: (
+                    pd.to_datetime(
+                        row.get(
+                            "next_followup_date"
+                        ),
+                        errors="coerce",
+                    )
+                    if not pd.isna(
+                        pd.to_datetime(
+                            row.get(
+                                "next_followup_date"
+                            ),
+                            errors="coerce",
+                        )
+                    )
+                    else pd.Timestamp.max
+                ),
+            )[:8]
+
+            if not sorted_followups:
+                st.markdown(
+                    """
+<div class="crm-empty">
+    <strong>Sin acciones pendientes</strong>
+    <span>No existen seguimientos registrados para este módulo.</span>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                action_rows = []
+
+                for item in sorted_followups:
+                    next_dt = pd.to_datetime(
+                        item.get(
+                            "next_followup_date"
+                        ),
+                        errors="coerce",
+                    )
+
+                    if pd.isna(next_dt):
+                        date_label = "-"
+                    else:
+                        date_label = (
+                            next_dt.strftime(
+                                "%d-%m-%Y"
+                            )
+                        )
+
+                    action_rows.append(
+                        {
+                            "Fecha": date_label,
+                            "Cliente": _safe_text(
+                                item.get(
+                                    "client_name"
+                                )
+                            ),
+                            "Acción": _safe_text(
+                                item.get(
+                                    "subject"
+                                )
+                                or item.get(
+                                    "followup_type"
+                                )
+                            ),
+                            "Responsable": _seller_name(
+                                item.get(
+                                    "seller"
+                                )
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    pd.DataFrame(
+                        action_rows
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=300,
+                )
+
+    # --------------------------------------------------------
+    # Segunda fila gerencial
+    # --------------------------------------------------------
+    left2, center2, right2 = st.columns(
+        [1.15, 1.0, 1.0],
+        gap="medium",
+    )
+
+    with left2:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">RIESGO COMERCIAL</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Clientes sin compra +90 días</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Detecta clientes que podrían necesitar reactivación comercial.
+            El cálculo usa como referencia el último corte disponible del ERP.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Cartera que requiere revisión.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if (
+                reference_date is None
+                or inactive_clients == 0
+            ):
+                st.markdown(
+                    """
+<div class="crm-empty">
+    <strong>Sin clientes en riesgo detectados</strong>
+    <span>No hay clientes con más de 90 días sin compra.</span>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                inactive_limit = (
+                    reference_date
+                    - timedelta(
+                        days=90
+                    )
+                )
+
+                risk = clients.copy()
+                risk["_fecha"] = pd.to_datetime(
+                    risk[
+                        "Última compra"
+                    ],
+                    errors="coerce",
+                )
+
+                risk = risk[
+                    risk["_fecha"].notna()
+                    & (
+                        risk["_fecha"]
+                        < inactive_limit
+                    )
+                ].sort_values(
+                    "_fecha",
+                    ascending=True,
+                ).head(10)
+
+                risk_display = risk[
+                    [
+                        "Cliente",
+                        "RUT",
+                        "Vendedor",
+                        "Última compra",
+                        "Ventas del período",
+                    ]
+                ].copy()
+
+                risk_display[
+                    "Vendedor"
+                ] = risk_display[
+                    "Vendedor"
+                ].map(
+                    _seller_name
+                )
+
+                risk_display[
+                    "Última compra"
+                ] = pd.to_datetime(
+                    risk_display[
+                        "Última compra"
+                    ],
+                    errors="coerce",
+                ).dt.strftime(
+                    "%d-%m-%Y"
+                )
+
+                st.dataframe(
+                    risk_display,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=300,
+                    column_config={
+                        "Ventas del período":
+                        st.column_config.NumberColumn(
+                            "Ventas del período",
+                            format="$ %.0f",
+                        )
+                    },
+                )
+
+    with center2:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">OPORTUNIDADES</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Negocios prioritarios</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Oportunidades abiertas ordenadas por monto estimado.
+            Sirve para identificar dónde concentrar la gestión comercial.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Mayores oportunidades actualmente abiertas.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            priority_opps = sorted(
+                open_opps,
+                key=lambda row: float(
+                    row.get(
+                        "estimated_amount"
+                    )
+                    or 0
+                ),
+                reverse=True,
+            )[:8]
+
+            if not priority_opps:
+                st.markdown(
+                    """
+<div class="crm-empty">
+    <strong>Sin negocios activos</strong>
+    <span>No hay oportunidades abiertas actualmente.</span>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                priority_rows = []
+
+                for item in priority_opps:
+                    priority_rows.append(
+                        {
+                            "Cliente":
+                            _safe_text(
+                                item.get(
+                                    "client_name"
+                                )
+                            ),
+                            "Oportunidad":
+                            _safe_text(
+                                item.get(
+                                    "title"
+                                )
+                            ),
+                            "Vendedor":
+                            _seller_name(
+                                item.get(
+                                    "seller"
+                                )
+                            ),
+                            "Etapa":
+                            _safe_text(
+                                item.get(
+                                    "stage"
+                                )
+                            ),
+                            "Prob.":
+                            float(
+                                item.get(
+                                    "probability"
+                                )
+                                or 0
+                            ),
+                            "Monto":
+                            float(
+                                item.get(
+                                    "estimated_amount"
+                                )
+                                or 0
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    pd.DataFrame(
+                        priority_rows
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=300,
+                    column_config={
+                        "Monto":
+                        st.column_config.NumberColumn(
+                            "Monto",
+                            format="$ %.0f",
+                        ),
+                        "Prob.":
+                        st.column_config.NumberColumn(
+                            "Prob.",
+                            format="%.0f %%",
+                        ),
+                    },
+                )
+
+    with right2:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">GESTIÓN</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Estado de seguimiento</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Resumen de las actividades comerciales pendientes, vencidas
+            y programadas para hoy.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Control de tareas comerciales.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            g1, g2, g3 = st.columns(
+                3,
+                gap="small",
+            )
+
+            with g1:
+                st.metric(
+                    "Pendientes",
+                    len(
+                        pending_followups
+                    ),
+                )
+
+            with g2:
+                st.metric(
+                    "Vencidos",
+                    len(
+                        overdue_followups
+                    ),
+                )
+
+            with g3:
+                st.metric(
+                    "Hoy",
+                    len(
+                        today_followups
+                    ),
+                )
+
+            followup_summary = pd.DataFrame(
+                [
+                    {
+                        "Estado": "Pendientes",
+                        "Cantidad": len(
+                            pending_followups
+                        ),
+                    },
+                    {
+                        "Estado": "Vencidos",
+                        "Cantidad": len(
+                            overdue_followups
+                        ),
+                    },
+                    {
+                        "Estado": "Para hoy",
+                        "Cantidad": len(
+                            today_followups
+                        ),
+                    },
+                ]
+            )
+
+            max_follow = max(int(followup_summary["Cantidad"].max()), 1)
+            followup_rows = []
+            status_colors = {
+                "Pendientes": "#FFC400",
+                "Vencidos": "#FF5A52",
+                "Para hoy": "#35D07F",
+            }
+            for _, item in followup_summary.iterrows():
+                label = str(item["Estado"])
+                qty = int(item["Cantidad"])
+                width = (qty / max_follow * 100) if qty else 0
+                followup_rows.append(
+                    f'<div class="crm-follow-row">'
+                    f'<div class="crm-follow-top"><span>{escape(label)}</span><strong>{qty}</strong></div>'
+                    f'<div class="crm-follow-track"><i style="width:{width:.1f}%;background:{status_colors.get(label, "#FFC400")}"></i></div>'
+                    f'</div>'
+                )
+            st.markdown(
+                '<div class="crm-follow-summary">' + ''.join(followup_rows) + '</div>',
+                unsafe_allow_html=True,
+            )
+
+    # --------------------------------------------------------
+    # Ranking vendedores solo en vista general
+    # --------------------------------------------------------
+    if active_seller == "Todos":
+        st.markdown("")
+
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                """
+<div class="crm-section-kicker">EQUIPO COMERCIAL</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Ranking de vendedores</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Compara las ventas del período ERP por vendedor. Los códigos excluidos del CRM
+            no participan del ranking.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Visión gerencial de ventas del período.
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.caption(
+                f"Período ERP: {_period_label()}"
+            )
+
+            seller_rank = (
+                clients.groupby(
+                    "Vendedor",
+                    as_index=False,
+                )
+                .agg(
+                    {
+                        "Ventas del período": "sum",
+                        "Cliente": "count",
+                    }
+                )
+                .rename(
+                    columns={
+                        "Cliente":
+                        "Clientes"
+                    }
+                )
+            )
+
+            seller_rank = seller_rank[
+                ~seller_rank[
+                    "Vendedor"
+                ].map(
+                    _is_excluded_seller
+                )
+            ].copy()
+
+            seller_rank["Vendedor"] = (
+                seller_rank[
+                    "Vendedor"
+                ].map(
+                    _seller_name
+                )
+            )
+
+            seller_rank = (
+                seller_rank
+                .sort_values(
+                    "Ventas del período",
+                    ascending=False,
+                )
+                .head(15)
+            )
+
+            _render_maritrex_table(
+                seller_rank,
+                money_cols=("Ventas del período",),
+                int_cols=("Clientes",),
+                max_rows=15,
+                css_class="crm-generic-table crm-ranking-table",
+            )
+
+
+
+def _render_maritrex_table(
+    df: pd.DataFrame,
+    money_cols: tuple[str, ...] = (),
+    int_cols: tuple[str, ...] = (),
+    max_rows: int | None = None,
+    css_class: str = "crm-generic-table",
+) -> None:
+    """Tabla HTML negra para evitar el fondo azul de st.dataframe."""
+    if df is None or df.empty:
+        st.caption("Sin datos disponibles.")
+        return
+
+    view = df.head(max_rows).copy() if max_rows else df.copy()
+    headers = "".join(f"<th>{escape(str(col))}</th>" for col in view.columns)
+    rows = []
+    for _, row in view.iterrows():
+        cells = []
+        for col in view.columns:
+            value = row.get(col)
+            classes = ["crm-generic-cell"]
+            if col in money_cols:
+                text = _money(_number(value))
+                classes.append("money")
+            elif col in int_cols:
+                text = str(int(_number(value)))
+                classes.append("num")
+            else:
+                text = _safe_text(value)
+            cls = " ".join(classes)
+            cells.append(f'<td class="{cls}">{escape(text)}</td>')
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    html = (
+        f'<div class="crm-generic-table-wrap">'
+        f'<table class="{css_class}">'
+        f'<thead><tr>{headers}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        f'</table></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+# ============================================================
+# CLIENTES
+# ============================================================
+
+
+def _render_clients(
+    clients: pd.DataFrame,
+) -> None:
+    """Vista compacta de cartera. El detalle completo vive en Ficha 360°."""
+    if clients.empty:
+        st.info("No existen clientes disponibles para el vendedor seleccionado.")
+        return
+
+    work = clients.copy()
+
+    # --------------------------------------------------------
+    # KPIs DE CARTERA
+    # --------------------------------------------------------
+    last_purchase = pd.to_datetime(work.get("Última compra"), errors="coerce")
+    reference_date = last_purchase.max()
+
+    if pd.isna(reference_date):
+        active_mask = pd.Series(False, index=work.index)
+        inactive_mask = pd.Series(False, index=work.index)
+    else:
+        days_since = (reference_date.normalize() - last_purchase.dt.normalize()).dt.days
+        active_mask = days_since.le(90) & days_since.notna()
+        inactive_mask = days_since.gt(90) & days_since.notna()
+
+    total_clients = int(len(work))
+    active_clients = int(active_mask.sum())
+    inactive_clients = int(inactive_mask.sum())
+    portfolio_sales = float(
+        pd.to_numeric(work.get("Ventas acumuladas", 0), errors="coerce")
+        .fillna(0)
+        .sum()
+    )
+
+    st.markdown(
+        """
+<div class="crm-section-kicker">CLIENTES</div>
+<div class="crm-title-line">
+    <div class="crm-section-title">Cartera comercial</div>
+    <span class="crm-help">?
+        <span class="crm-help-tip">
+            Usa esta vista para encontrar y priorizar clientes. El detalle completo
+            se abre en Ficha 360°.
+        </span>
+    </span>
+</div>
+<div class="crm-section-sub">
+    Consulta rápidamente tu cartera y abre la Ficha 360° del cliente que necesites.
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Colores exclusivos de los KPI de la pestaña Clientes.
+    # Se inyectan aquí para quedar después de los overrides globales del CRM.
+    st.markdown(
+        """
+<style>
+.crm-client-kpis{
+    display:grid !important;
+    grid-template-columns:repeat(4,minmax(0,1fr)) !important;
+    gap:12px !important;
+    margin:14px 0 18px !important;
+}
+.crm-client-kpis > .crm-kpi{
+    position:relative !important;
+    min-height:150px !important;
+    padding:22px 22px 20px 24px !important;
+    border:1px solid #30414A !important;
+    border-radius:11px !important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.025),0 8px 24px rgba(0,0,0,.18) !important;
+    overflow:hidden !important;
+}
+.crm-client-kpis > .crm-kpi::before{
+    content:"" !important;
+    position:absolute !important;
+    left:0 !important;top:0 !important;bottom:0 !important;
+    width:4px !important;
+    background:#FFD400 !important;
+}
+.crm-client-kpis > .crm-kpi:nth-child(1){
+    background:linear-gradient(135deg,#073326 0%,#08241C 48%,#07110E 100%) !important;
+}
+.crm-client-kpis > .crm-kpi:nth-child(2){
+    background:linear-gradient(135deg,#0A2942 0%,#0A1F31 48%,#071018 100%) !important;
+}
+.crm-client-kpis > .crm-kpi:nth-child(3){
+    background:linear-gradient(135deg,#321A46 0%,#251532 48%,#120B18 100%) !important;
+}
+.crm-client-kpis > .crm-kpi:nth-child(4){
+    background:linear-gradient(135deg,#3B3108 0%,#282106 48%,#151204 100%) !important;
+}
+.crm-client-kpis .crm-kpi-label{
+    color:#C7D3DA !important;
+    font-size:10px !important;
+    font-weight:850 !important;
+}
+.crm-client-kpis .crm-kpi-value{
+    color:#FFFFFF !important;
+    font-size:30px !important;
+    line-height:1.05 !important;
+    font-weight:900 !important;
+    margin-top:14px !important;
+}
+.crm-client-kpis .crm-kpi-help{
+    color:#91A4AE !important;
+    font-size:9px !important;
+    margin-top:13px !important;
+}
+.crm-client-kpis .crm-kpi-help.accent{color:#91A4AE !important;}
+@media(max-width:1100px){.crm-client-kpis{grid-template-columns:repeat(2,minmax(0,1fr)) !important;}}
+@media(max-width:650px){.crm-client-kpis{grid-template-columns:1fr !important;}}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    kpi_html = (
+        '<div class="crm-kpis crm-client-kpis">'
+        f'<div class="crm-kpi"><div class="crm-kpi-label">Clientes totales</div>'
+        f'<div class="crm-kpi-value">{total_clients:,}</div>'
+        f'<div class="crm-kpi-help">Cartera comercial</div></div>'
+        f'<div class="crm-kpi"><div class="crm-kpi-label">Clientes activos</div>'
+        f'<div class="crm-kpi-value">{active_clients:,}</div>'
+        f'<div class="crm-kpi-help accent">Compra en últimos 90 días</div></div>'
+        f'<div class="crm-kpi"><div class="crm-kpi-label">Sin compra +90 días</div>'
+        f'<div class="crm-kpi-value">{inactive_clients:,}</div>'
+        f'<div class="crm-kpi-help">Requieren atención</div></div>'
+        f'<div class="crm-kpi"><div class="crm-kpi-label">Venta cartera</div>'
+        f'<div class="crm-kpi-value">{escape(_money(portfolio_sales))}</div>'
+        f'<div class="crm-kpi-help">Venta acumulada disponible</div></div>'
+        '</div>'
+    ).replace(",", ".")
+    st.markdown(kpi_html, unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # FILTROS COMPACTOS
+    # --------------------------------------------------------
+    f1, f2, f3 = st.columns([2.3, 1.15, 1.15], gap="small")
+
+    with f1:
+        search = st.text_input(
+            "Buscar cliente",
+            placeholder="Nombre o RUT...",
+            key="crm_client_search_v4",
+        )
+
+    seller_values = sorted(
+        {
+            _seller_name(v)
+            for v in work.get("Vendedor", pd.Series(dtype=object)).dropna().tolist()
+            if _seller_name(v)
+        }
+    )
+
+    with f2:
+        seller_filter = st.selectbox(
+            "Vendedor",
+            ["Todos"] + seller_values,
+            key="crm_client_seller_filter_v4",
+        )
+
+    with f3:
+        order_by = st.selectbox(
+            "Ordenar por",
+            [
+                "Ventas acumuladas",
+                "Última compra",
+                "Pedidos",
+                "Cliente",
+            ],
+            key="crm_client_order_v4",
+        )
+
+    requested_filter = st.session_state.pop("crm_requested_filter", None)
+
+    if requested_filter == "inactive_90":
+        filtered = work[inactive_mask].copy()
+        st.info(
+            "Filtro aplicado desde Centro de alertas: "
+            "clientes con más de 90 días sin compra."
+        )
+    else:
+        filtered = work.copy()
+
+    if search:
+        query = search.strip().lower()
+        mask = (
+            filtered["Cliente"].fillna("").astype(str).str.lower().str.contains(query, regex=False)
+            | filtered["RUT"].fillna("").astype(str).str.lower().str.contains(query, regex=False)
+        )
+        filtered = filtered[mask]
+
+    if seller_filter != "Todos":
+        seller_series = filtered["Vendedor"].map(_seller_name)
+        filtered = filtered[seller_series == seller_filter]
+
+    if filtered.empty:
+        st.info("No existen clientes que coincidan con los filtros.")
+        return
+
+    if order_by == "Cliente":
+        filtered = filtered.sort_values("Cliente", ascending=True, na_position="last")
+    elif order_by == "Última compra":
+        filtered = filtered.sort_values("Última compra", ascending=False, na_position="last")
+    elif order_by in filtered.columns:
+        filtered = filtered.sort_values(order_by, ascending=False, na_position="last")
+
+    # --------------------------------------------------------
+    # PAGINACIÓN
+    # --------------------------------------------------------
+    rows_per_page = 12
+    total_rows = len(filtered)
+    total_pages = max(1, (total_rows + rows_per_page - 1) // rows_per_page)
+
+    current_page = int(st.session_state.get("crm_clients_page_v4", 1))
+    current_page = min(max(current_page, 1), total_pages)
+    st.session_state["crm_clients_page_v4"] = current_page
+
+    start = (current_page - 1) * rows_per_page
+    end = min(start + rows_per_page, total_rows)
+    page_df = filtered.iloc[start:end].copy()
+
+    st.markdown(
+        f"""
+<div class="crm-client-list-head">
+    <div>
+        <span class="crm-client-list-accent"></span>
+        <strong>Cartera de clientes</strong>
+    </div>
+    <span>{total_rows:,} clientes encontrados</span>
+</div>
+        """.replace(",", "."),
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+<style>
+.crm-client-list-head{
+    margin-top:10px;
+    padding:12px 14px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    border:1px solid #292929;
+    border-bottom:0;
+    border-radius:10px 10px 0 0;
+    background:#0A0A0A;
+    color:#FFFFFF;
+    font-size:10px;
+}
+.crm-client-list-head > div{
+    display:flex;
+    align-items:center;
+    gap:9px;
+}
+.crm-client-list-head > span{
+    color:#9EA8AF;
+    font-size:9px;
+}
+.crm-client-list-accent{
+    display:inline-block;
+    width:3px;
+    height:18px;
+    border-radius:3px;
+    background:#FFC400;
+}
+.crm-client-row-header,
+.crm-client-row{
+    display:grid;
+    grid-template-columns:minmax(220px,2.2fr) 135px minmax(145px,1.1fr) 125px 85px 125px 128px;
+    gap:10px;
+    align-items:center;
+}
+.crm-client-row-header{
+    padding:9px 12px;
+    border-left:1px solid #292929;
+    border-right:1px solid #292929;
+    border-bottom:1px solid #292929;
+    background:#0D0D0D;
+    color:#8F9AA2;
+    font-size:8px;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+}
+.crm-client-row-card{
+    border-left:1px solid #292929;
+    border-right:1px solid #292929;
+    border-bottom:1px solid #202020;
+    background:#070707;
+    padding:0 12px;
+}
+.crm-client-row-card:hover{background:#0D0D0D;}
+.crm-client-row{
+    min-height:48px;
+    color:#EDF1F3;
+    font-size:9px;
+}
+.crm-client-row .name{
+    min-width:0;
+    font-weight:850;
+    color:#FFFFFF;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+.crm-client-row .muted{color:#B0BAC1;}
+.crm-client-row .money{
+    color:#FFC400;
+    font-weight:850;
+    white-space:nowrap;
+}
+.crm-client-row .date{color:#CBD2D7;white-space:nowrap;}
+.crm-client-row .orders{text-align:center;font-weight:800;}
+.crm-client-row-card:last-of-type{border-radius:0 0 10px 10px;}
+.crm-client-action-spacer{height:1px;}
+@media(max-width:1150px){
+    .crm-client-row-header{display:none;}
+    .crm-client-row{
+        grid-template-columns:1.7fr 1fr 1fr 1fr;
+        min-height:58px;
+    }
+    .crm-client-row .hide-tablet{display:none;}
+}
+</style>
+<div class="crm-client-row-header">
+    <div>Cliente</div>
+    <div>RUT</div>
+    <div>Vendedor</div>
+    <div>Ventas</div>
+    <div>Pedidos</div>
+    <div>Última compra</div>
+    <div>Acción</div>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Cada fila usa HTML para datos + botón Streamlit real al final.
+    for row_index, (_, row) in enumerate(page_df.iterrows(), start=start):
+        client_name = _safe_text(row.get("Cliente"))
+        client_rut = _safe_text(row.get("RUT"))
+        client_seller = _seller_name(row.get("Vendedor"))
+        sales_value = _money(_number(row.get("Ventas acumuladas")))
+        orders = int(_number(row.get("Pedidos")))
+        last_dt = pd.to_datetime(row.get("Última compra"), errors="coerce")
+        last_txt = last_dt.strftime("%d-%m-%Y") if not pd.isna(last_dt) else "-"
+
+        cols = st.columns([2.2, 1.05, 1.35, 1.05, .62, 1.02, 1.05], gap="small")
+
+        with cols[0]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9.5px;font-weight:850;color:#fff;">'
+                f'{escape(client_name)}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[1]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9px;color:#b7c0c6;">'
+                f'{escape(client_rut or "-")}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[2]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9px;color:#d8dde1;">'
+                f'{escape(client_seller or "-")}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[3]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9px;color:#ffc400;font-weight:850;">'
+                f'{escape(sales_value)}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[4]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9px;color:#edf1f3;text-align:center;font-weight:800;">'
+                f'{orders}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[5]:
+            st.markdown(
+                f'<div style="padding:9px 0 8px;font-size:9px;color:#cbd2d7;">'
+                f'{escape(last_txt)}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[6]:
+            st.button(
+                "Ver ficha →",
+                key=f"crm_open_360_{row_index}_{client_rut or client_name}",
+                use_container_width=True,
+                on_click=_open_client_360,
+                args=(client_name, client_rut),
+            )
+
+        st.markdown(
+            '<div style="height:1px;background:#202020;margin:-2px 0 2px;"></div>',
+            unsafe_allow_html=True,
+        )
+
+    # --------------------------------------------------------
+    # PAGINACIÓN INFERIOR
+    # --------------------------------------------------------
+    p1, p2, p3 = st.columns([1, 1.8, 1], gap="small")
+
+    with p1:
+        st.caption(f"Mostrando {start + 1}–{end} de {total_rows}")
+
+    with p2:
+        st.markdown(
+            f"<div style='text-align:center;color:#9EA8AF;font-size:9px;padding-top:8px;'>"
+            f"Página <b style='color:#FFC400'>{current_page}</b> de {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+
+    with p3:
+        prev_col, next_col = st.columns(2, gap="small")
+        with prev_col:
+            if st.button(
+                "← Anterior",
+                disabled=current_page <= 1,
+                key="crm_clients_prev_v4",
+                use_container_width=True,
+            ):
+                st.session_state["crm_clients_page_v4"] = current_page - 1
+                st.rerun()
+        with next_col:
+            if st.button(
+                "Siguiente →",
+                disabled=current_page >= total_pages,
+                key="crm_clients_next_v4",
+                use_container_width=True,
+            ):
+                st.session_state["crm_clients_page_v4"] = current_page + 1
+                st.rerun()
+
+
+# ============================================================
+# OPORTUNIDADES
+# ============================================================
+
+def _render_opportunities(
+    clients: pd.DataFrame,
+) -> None:
+    st.markdown(
+        """
+<div class="crm-section-kicker">OPORTUNIDADES</div>
+<div class="crm-title-line"><div class="crm-section-title">Gestión comercial</div><span class="crm-help">?<span class="crm-help-tip">Aquí puedes crear, revisar y actualizar oportunidades comerciales asociadas a clientes del ERP.</span></span></div>
+<div class="crm-section-sub">Crea, administra y actualiza negocios comerciales guardados en PostgreSQL.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        rows = list_opportunities(
+            seller=(
+                _get_active_seller()
+                if _get_active_seller() != "Todos"
+                else None
+            ),
+            limit=1000,
+        )
+        rows = _filter_excluded_db_rows(rows)
+    except Exception as exc:
+        st.error(f"No fue posible cargar las oportunidades: {exc}")
+        return
+
+    # --------------------------------------------------------
+    # KPIs
+    # --------------------------------------------------------
+    try:
+        summary = get_crm_summary()
+    except Exception:
+        summary = {}
+
+    k1, k2, k3, k4 = st.columns(4, gap="small")
+
+    with k1:
+        st.metric(
+            "Oportunidades abiertas",
+            int(summary.get("open_opportunities") or 0),
+        )
+
+    with k2:
+        st.metric(
+            "Monto abierto",
+            _money(summary.get("open_amount") or 0),
+        )
+
+    with k3:
+        st.metric(
+            "Monto ponderado",
+            _money(summary.get("weighted_amount") or 0),
+        )
+
+    with k4:
+        st.metric(
+            "Ganadas",
+            int(summary.get("won_opportunities") or 0),
+        )
+
+    # --------------------------------------------------------
+    # CREAR OPORTUNIDAD
+    # --------------------------------------------------------
+    with st.expander(
+        "Nueva oportunidad",
+        expanded=not bool(rows),
+    ):
+        if clients.empty:
+            st.warning(
+                "No hay clientes ERP disponibles para crear oportunidades."
+            )
+        else:
+            client_records = clients[
+                ["Cliente", "RUT", "Vendedor"]
+            ].copy()
+
+            client_records["Cliente"] = (
+                client_records["Cliente"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+            client_records["RUT"] = (
+                client_records["RUT"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            client_records = client_records[
+                client_records["Cliente"].ne("")
+            ].reset_index(drop=True)
+
+            labels: list[str] = []
+            client_map: dict[str, dict[str, Any]] = {}
+
+            for _, row in client_records.iterrows():
+                client_name = _safe_text(
+                    row.get("Cliente"),
+                    "",
+                )
+                client_rut = _safe_text(
+                    row.get("RUT"),
+                    "",
+                )
+
+                label = (
+                    f"{client_name} · {client_rut}"
+                    if client_rut
+                    else client_name
+                )
+
+                if label in client_map:
+                    continue
+
+                labels.append(label)
+                client_map[label] = {
+                    "Cliente": client_name,
+                    "RUT": client_rut,
+                    "Vendedor": _safe_text(
+                        row.get("Vendedor"),
+                        "",
+                    ),
+                }
+
+            with st.form(
+                "crm_new_opportunity_form",
+                clear_on_submit=True,
+            ):
+                selected_client_label = st.selectbox(
+                    "Cliente",
+                    labels,
+                    key="crm_new_opportunity_client",
+                )
+
+                selected_client = client_map.get(
+                    selected_client_label,
+                    {},
+                )
+
+                f1, f2 = st.columns(
+                    [1.35, 1],
+                    gap="small",
+                )
+
+                with f1:
+                    title = st.text_input(
+                        "Nombre de oportunidad",
+                        placeholder="Ej: Renovación uniformes temporada 2027",
+                    )
+
+                with f2:
+                    seller = st.text_input(
+                        "Vendedor",
+                        value=selected_client.get(
+                            "Vendedor",
+                            "",
+                        ),
+                    )
+
+                f3, f4, f5 = st.columns(
+                    [1, 1, 1],
+                    gap="small",
+                )
+
+                with f3:
+                    estimated_amount = st.number_input(
+                        "Monto estimado",
+                        min_value=0.0,
+                        step=10000.0,
+                        format="%.0f",
+                    )
+
+                with f4:
+                    stage = st.selectbox(
+                        "Etapa",
+                        CRM_STAGES,
+                        index=0,
+                    )
+
+                with f5:
+                    probability = st.number_input(
+                        "Probabilidad (%)",
+                        min_value=0,
+                        max_value=100,
+                        value=CRM_STAGE_PROBABILITY.get(
+                            stage,
+                            10,
+                        ),
+                        step=5,
+                    )
+
+                f6, f7 = st.columns(
+                    2,
+                    gap="small",
+                )
+
+                with f6:
+                    expected_close_date = st.date_input(
+                        "Fecha estimada de cierre",
+                    )
+
+                with f7:
+                    next_action_date = st.date_input(
+                        "Fecha próxima acción",
+                    )
+
+                next_action = st.text_input(
+                    "Próxima acción",
+                    placeholder="Ej: Enviar cotización actualizada",
+                )
+
+                description = st.text_area(
+                    "Observaciones",
+                    placeholder="Antecedentes, requerimientos y notas comerciales...",
+                    height=100,
+                )
+
+                submitted = st.form_submit_button(
+                    "Guardar oportunidad",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+                if submitted:
+                    if not title.strip():
+                        st.error(
+                            "Debes ingresar un nombre para la oportunidad."
+                        )
+                    else:
+                        try:
+                            create_opportunity(
+                                client_name=selected_client.get(
+                                    "Cliente",
+                                    "",
+                                ),
+                                client_rut=selected_client.get(
+                                    "RUT",
+                                    "",
+                                ),
+                                seller=seller,
+                                title=title,
+                                description=description,
+                                estimated_amount=estimated_amount,
+                                stage=stage,
+                                probability=int(probability),
+                                expected_close_date=expected_close_date,
+                                next_action_date=next_action_date,
+                                next_action=next_action,
+                                status="Abierta",
+                            )
+
+                            st.success(
+                                "Oportunidad guardada correctamente."
+                            )
+                            st.rerun()
+
+                        except Exception as exc:
+                            st.error(
+                                f"No fue posible guardar la oportunidad: {exc}"
+                            )
+
+    st.markdown("")
+
+    # --------------------------------------------------------
+    # LISTADO
+    # --------------------------------------------------------
+    if not rows:
+        st.info(
+            "Todavía no existen oportunidades registradas."
+        )
+        return
+
+    display = _opportunity_display_frame(rows)
+
+    with st.container(border=True):
+        st.markdown(
+            """
+<div class="crm-section-kicker">CARTERA COMERCIAL</div>
+<div class="crm-title-line"><div class="crm-section-title">Oportunidades registradas</div><span class="crm-help">?<span class="crm-help-tip">Listado de negocios comerciales guardados en PostgreSQL. Puedes filtrar, revisar estado, monto, etapa y próximas acciones.</span></span></div>
+<div class="crm-section-sub">Negocios almacenados de forma persistente en PostgreSQL.</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        filter1, filter2, filter3 = st.columns(
+            [1.3, 1, 1],
+            gap="small",
+        )
+
+        with filter1:
+            search = st.text_input(
+                "Buscar",
+                placeholder="Cliente, RUT u oportunidad...",
+                key="crm_opp_search",
+            )
+
+        with filter2:
+            stage_filter = st.selectbox(
+                "Etapa",
+                ["Todas"] + list(CRM_STAGES),
+                key="crm_opp_stage_filter",
+            )
+
+        with filter3:
+            status_filter = st.selectbox(
+                "Estado",
+                ["Todos"] + list(CRM_STATUSES),
+                key="crm_opp_status_filter",
+            )
+
+        filtered = display.copy()
+
+        if st.session_state.get("crm_requested_filter") == "overdue":
+            today = pd.Timestamp.today().normalize()
+            next_dates = pd.to_datetime(
+                filtered["Próximo seguimiento"],
+                errors="coerce",
+            )
+            filtered = filtered[
+                filtered["Estado"].eq("Pendiente")
+                & next_dates.notna()
+                & next_dates.dt.normalize().lt(today)
+            ].copy()
+            st.info(
+                "Filtro aplicado desde Centro de alertas: "
+                "solo seguimientos vencidos."
+            )
+
+        if search:
+            query = search.strip().lower()
+            mask = pd.Series(
+                False,
+                index=filtered.index,
+            )
+
+            for column in (
+                "Cliente",
+                "RUT",
+                "Oportunidad",
+                "Vendedor",
+            ):
+                mask = (
+                    mask
+                    | filtered[column]
+                    .fillna("")
+                    .astype(str)
+                    .str.lower()
+                    .str.contains(
+                        query,
+                        regex=False,
+                    )
+                )
+
+            filtered = filtered[mask]
+
+        if stage_filter != "Todas":
+            filtered = filtered[
+                filtered["Etapa"] == stage_filter
+            ]
+
+        if status_filter != "Todos":
+            filtered = filtered[
+                filtered["Estado"] == status_filter
+            ]
+
+        st.dataframe(
+            filtered,
+            hide_index=True,
+            use_container_width=True,
+            height=min(
+                500,
+                70 + max(len(filtered), 1) * 35,
+            ),
+            column_config={
+                "Monto": st.column_config.NumberColumn(
+                    "Monto",
+                    format="$ %.0f",
+                ),
+                "Probabilidad": st.column_config.NumberColumn(
+                    "Probabilidad",
+                    format="%d %%",
+                ),
+            },
+        )
+
+    # --------------------------------------------------------
+    # EDITAR
+    # --------------------------------------------------------
+    opportunity_map: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        label = (
+            f"#{row.get('id')} · "
+            f"{_safe_text(row.get('client_name'))} · "
+            f"{_safe_text(row.get('title'))}"
+        )
+        opportunity_map[label] = row
+
+    with st.expander(
+        "Editar oportunidad",
+        expanded=False,
+    ):
+        selected_label = st.selectbox(
+            "Seleccionar oportunidad",
+            list(opportunity_map.keys()),
+            key="crm_edit_opportunity_select",
+        )
+
+        selected = opportunity_map[selected_label]
+
+        stage_value = _safe_text(
+            selected.get("stage"),
+            "Prospección",
+        )
+        status_value = _safe_text(
+            selected.get("status"),
+            "Abierta",
+        )
+
+        stage_index = (
+            CRM_STAGES.index(stage_value)
+            if stage_value in CRM_STAGES
+            else 0
+        )
+
+        status_index = (
+            CRM_STATUSES.index(status_value)
+            if status_value in CRM_STATUSES
+            else 0
+        )
+
+        expected_date = pd.to_datetime(
+            selected.get("expected_close_date"),
+            errors="coerce",
+        )
+        next_date = pd.to_datetime(
+            selected.get("next_action_date"),
+            errors="coerce",
+        )
+
+        with st.form(
+            f"crm_edit_opportunity_form_{selected.get('id')}",
+        ):
+            e1, e2 = st.columns(
+                [1.4, 1],
+                gap="small",
+            )
+
+            with e1:
+                edit_title = st.text_input(
+                    "Oportunidad",
+                    value=_safe_text(
+                        selected.get("title"),
+                        "",
+                    ),
+                )
+
+            with e2:
+                edit_seller = st.text_input(
+                    "Vendedor",
+                    value=_safe_text(
+                        selected.get("seller"),
+                        "",
+                    ),
+                )
+
+            e3, e4, e5, e6 = st.columns(
+                4,
+                gap="small",
+            )
+
+            with e3:
+                edit_amount = st.number_input(
+                    "Monto estimado",
+                    min_value=0.0,
+                    value=float(
+                        selected.get("estimated_amount")
+                        or 0
+                    ),
+                    step=10000.0,
+                    format="%.0f",
+                )
+
+            with e4:
+                edit_stage = st.selectbox(
+                    "Etapa",
+                    CRM_STAGES,
+                    index=stage_index,
+                )
+
+            with e5:
+                edit_probability = st.number_input(
+                    "Probabilidad (%)",
+                    min_value=0,
+                    max_value=100,
+                    value=int(
+                        selected.get("probability")
+                        or 0
+                    ),
+                    step=5,
+                )
+
+            with e6:
+                edit_status = st.selectbox(
+                    "Estado",
+                    CRM_STATUSES,
+                    index=status_index,
+                )
+
+            e7, e8 = st.columns(
+                2,
+                gap="small",
+            )
+
+            with e7:
+                edit_expected_date = st.date_input(
+                    "Fecha estimada de cierre",
+                    value=(
+                        expected_date.date()
+                        if not pd.isna(expected_date)
+                        else datetime.now().date()
+                    ),
+                )
+
+            with e8:
+                edit_next_date = st.date_input(
+                    "Fecha próxima acción",
+                    value=(
+                        next_date.date()
+                        if not pd.isna(next_date)
+                        else datetime.now().date()
+                    ),
+                )
+
+            edit_next_action = st.text_input(
+                "Próxima acción",
+                value=_safe_text(
+                    selected.get("next_action"),
+                    "",
+                ),
+            )
+
+            edit_description = st.text_area(
+                "Observaciones",
+                value=_safe_text(
+                    selected.get("description"),
+                    "",
+                ),
+                height=100,
+            )
+
+            update_submitted = st.form_submit_button(
+                "Guardar cambios",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if update_submitted:
+                if not edit_title.strip():
+                    st.error(
+                        "El nombre de la oportunidad no puede quedar vacío."
+                    )
+                else:
+                    try:
+                        update_opportunity(
+                            int(selected["id"]),
+                            title=edit_title,
+                            seller=edit_seller,
+                            description=edit_description,
+                            estimated_amount=edit_amount,
+                            stage=edit_stage,
+                            probability=int(edit_probability),
+                            expected_close_date=edit_expected_date,
+                            next_action_date=edit_next_date,
+                            next_action=edit_next_action,
+                            status=edit_status,
+                        )
+
+                        st.success(
+                            "Oportunidad actualizada correctamente."
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            f"No fue posible actualizar la oportunidad: {exc}"
+                        )
+
+
+# ============================================================
+# SEGUIMIENTOS
+# ============================================================
+
+def _render_followups(
+    clients: pd.DataFrame,
+) -> None:
+    st.markdown(
+        """
+<div class="crm-section-kicker">SEGUIMIENTOS</div>
+<div class="crm-title-line"><div class="crm-section-title">Próximas acciones</div><span class="crm-help">?<span class="crm-help-tip">Agenda de llamadas, correos, reuniones, tareas y otros seguimientos pendientes con clientes u oportunidades.</span></span></div>
+<div class="crm-section-sub">Llamadas, correos, reuniones, WhatsApp, tareas y notas comerciales persistentes.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        followups = list_followups(
+            seller=(
+                _get_active_seller()
+                if _get_active_seller() != "Todos"
+                else None
+            ),
+            limit=1000,
+        )
+        opportunities = list_opportunities(
+            seller=(
+                _get_active_seller()
+                if _get_active_seller() != "Todos"
+                else None
+            ),
+            limit=1000,
+        )
+        summary = get_crm_summary()
+    except Exception as exc:
+        st.error(
+            f"No fue posible cargar los seguimientos: {exc}"
+        )
+        return
+
+    # --------------------------------------------------------
+    # KPIs
+    # --------------------------------------------------------
+    pending_count = int(
+        summary.get("pending_followups") or 0
+    )
+    overdue_count = int(
+        summary.get("overdue_followups") or 0
+    )
+    today_count = int(
+        summary.get("today_followups") or 0
+    )
+
+    followup_kpis_html = (
+        '<div class="crm-kpis" style="grid-template-columns:repeat(3,minmax(0,1fr));">'
+        '<div class="crm-kpi yellow">'
+        '<div class="crm-kpi-label">Pendientes</div>'
+        f'<div class="crm-kpi-value">{pending_count}</div>'
+        '<div class="crm-kpi-help">Seguimientos por realizar</div>'
+        '</div>'
+        '<div class="crm-kpi orange">'
+        '<div class="crm-kpi-label">Vencidos</div>'
+        f'<div class="crm-kpi-value">{overdue_count}</div>'
+        '<div class="crm-kpi-help orange">Requieren atención</div>'
+        '</div>'
+        '<div class="crm-kpi green">'
+        '<div class="crm-kpi-label">Para hoy</div>'
+        f'<div class="crm-kpi-value">{today_count}</div>'
+        '<div class="crm-kpi-help green">Agenda del día</div>'
+        '</div>'
+        '</div>'
+    )
+
+    st.markdown(
+        followup_kpis_html,
+        unsafe_allow_html=True,
+    )
+
+    # --------------------------------------------------------
+    # NUEVO SEGUIMIENTO
+    # --------------------------------------------------------
+    with st.expander(
+        "Nuevo seguimiento",
+        expanded=not bool(followups),
+    ):
+        mode = st.radio(
+            "Asociar seguimiento a",
+            options=[
+                "Oportunidad",
+                "Cliente",
+            ],
+            horizontal=True,
+            key="crm_followup_mode",
+        )
+
+        opportunity_map: dict[str, dict[str, Any]] = {}
+        client_map: dict[str, dict[str, Any]] = {}
+
+        for opportunity in opportunities:
+            label = _followup_opportunity_label(
+                opportunity
+            )
+            opportunity_map[label] = opportunity
+
+        if not clients.empty:
+            for _, row in clients.iterrows():
+                client_name = _safe_text(
+                    row.get("Cliente"),
+                    "",
+                )
+                client_rut = _safe_text(
+                    row.get("RUT"),
+                    "",
+                )
+
+                if not client_name:
+                    continue
+
+                label = (
+                    f"{client_name} · {client_rut}"
+                    if client_rut
+                    else client_name
+                )
+
+                if label in client_map:
+                    continue
+
+                client_map[label] = {
+                    "Cliente": client_name,
+                    "RUT": client_rut,
+                    "Vendedor": _safe_text(
+                        row.get("Vendedor"),
+                        "",
+                    ),
+                }
+
+        selected_opportunity = None
+        selected_client = None
+
+        if mode == "Oportunidad":
+            if not opportunity_map:
+                st.info(
+                    "No existen oportunidades disponibles. "
+                    "Puedes registrar el seguimiento directamente por cliente."
+                )
+            else:
+                opportunity_label = st.selectbox(
+                    "Oportunidad",
+                    list(opportunity_map.keys()),
+                    key="crm_followup_opportunity",
+                )
+                selected_opportunity = opportunity_map.get(
+                    opportunity_label
+                )
+
+        if mode == "Cliente" or (
+            mode == "Oportunidad"
+            and not opportunity_map
+        ):
+            if not client_map:
+                st.warning(
+                    "No existen clientes ERP disponibles."
+                )
+            else:
+                client_label = st.selectbox(
+                    "Cliente",
+                    list(client_map.keys()),
+                    key="crm_followup_client",
+                )
+                selected_client = client_map.get(
+                    client_label
+                )
+
+        if selected_opportunity:
+            default_client_name = _safe_text(
+                selected_opportunity.get("client_name"),
+                "",
+            )
+            default_client_rut = _safe_text(
+                selected_opportunity.get("client_rut"),
+                "",
+            )
+            default_seller = _safe_text(
+                selected_opportunity.get("seller"),
+                "",
+            )
+            default_opportunity_id = int(
+                selected_opportunity["id"]
+            )
+        elif selected_client:
+            default_client_name = selected_client.get(
+                "Cliente",
+                "",
+            )
+            default_client_rut = selected_client.get(
+                "RUT",
+                "",
+            )
+            default_seller = selected_client.get(
+                "Vendedor",
+                "",
+            )
+            default_opportunity_id = None
+        else:
+            default_client_name = ""
+            default_client_rut = ""
+            default_seller = ""
+            default_opportunity_id = None
+
+        if default_client_name:
+            with st.form(
+                "crm_new_followup_form",
+                clear_on_submit=True,
+            ):
+                f1, f2, f3 = st.columns(
+                    [1, 1.15, 1],
+                    gap="small",
+                )
+
+                with f1:
+                    followup_type = st.selectbox(
+                        "Tipo",
+                        CRM_FOLLOWUP_TYPES,
+                    )
+
+                with f2:
+                    subject = st.text_input(
+                        "Asunto",
+                        placeholder="Ej: Confirmar recepción de cotización",
+                    )
+
+                with f3:
+                    seller = st.text_input(
+                        "Responsable",
+                        value=default_seller,
+                    )
+
+                st.caption(
+                    f"Cliente: {default_client_name} · "
+                    f"RUT: {default_client_rut or '-'}"
+                )
+
+                notes = st.text_area(
+                    "Detalle",
+                    placeholder="Resumen de llamada, correo, reunión o tarea...",
+                    height=110,
+                )
+
+                next_followup_date = st.date_input(
+                    "Próximo seguimiento",
+                    key="crm_new_followup_date",
+                )
+
+                submitted = st.form_submit_button(
+                    "Guardar seguimiento",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+                if submitted:
+                    if not subject.strip() and not notes.strip():
+                        st.error(
+                            "Ingresa un asunto o detalle para el seguimiento."
+                        )
+                    else:
+                        try:
+                            create_followup(
+                                opportunity_id=default_opportunity_id,
+                                client_rut=default_client_rut,
+                                client_name=default_client_name,
+                                seller=seller,
+                                followup_type=followup_type,
+                                subject=subject,
+                                notes=notes,
+                                next_followup_date=next_followup_date,
+                                completed=False,
+                            )
+
+                            st.success(
+                                "Seguimiento guardado correctamente."
+                            )
+                            st.rerun()
+
+                        except Exception as exc:
+                            st.error(
+                                f"No fue posible guardar el seguimiento: {exc}"
+                            )
+
+    st.markdown("")
+
+    # --------------------------------------------------------
+    # LISTADO
+    # --------------------------------------------------------
+    if not followups:
+        st.info(
+            "Todavía no existen seguimientos registrados."
+        )
+        return
+
+    display = _followup_display_frame(
+        followups
+    )
+
+    requested_filter = st.session_state.pop("crm_requested_filter", None)
+    if requested_filter == "overdue":
+        st.session_state["crm_followup_state_filter"] = "Pendiente"
+
+    with st.container(border=True):
+        st.markdown(
+            """
+<div class="crm-section-kicker">AGENDA COMERCIAL</div>
+<div class="crm-title-line"><div class="crm-section-title">Seguimientos registrados</div><span class="crm-help">?<span class="crm-help-tip">Historial y agenda de llamadas, correos, reuniones, tareas y notas. Los pendientes y vencidos se calculan según la próxima fecha.</span></span></div>
+<div class="crm-section-sub">Historial y próximas acciones guardadas en PostgreSQL.</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        f1, f2, f3 = st.columns(
+            [1.4, 1, 1],
+            gap="small",
+        )
+
+        with f1:
+            search = st.text_input(
+                "Buscar",
+                placeholder="Cliente, RUT, asunto o responsable...",
+                key="crm_followup_search",
+            )
+
+        with f2:
+            type_filter = st.selectbox(
+                "Tipo",
+                ["Todos"] + list(CRM_FOLLOWUP_TYPES),
+                key="crm_followup_type_filter",
+            )
+
+        with f3:
+            state_filter = st.selectbox(
+                "Estado",
+                [
+                    "Todos",
+                    "Pendiente",
+                    "Completado",
+                ],
+                key="crm_followup_state_filter",
+            )
+
+        filtered = display.copy()
+
+        if search:
+            query = search.strip().lower()
+
+            mask = pd.Series(
+                False,
+                index=filtered.index,
+            )
+
+            for column in (
+                "Cliente",
+                "RUT",
+                "Asunto",
+                "Responsable",
+                "Detalle",
+            ):
+                mask = (
+                    mask
+                    | filtered[column]
+                    .fillna("")
+                    .astype(str)
+                    .str.lower()
+                    .str.contains(
+                        query,
+                        regex=False,
+                    )
+                )
+
+            filtered = filtered[
+                mask
+            ]
+
+        if type_filter != "Todos":
+            filtered = filtered[
+                filtered["Tipo"] == type_filter
+            ]
+
+        if state_filter != "Todos":
+            filtered = filtered[
+                filtered["Estado"] == state_filter
+            ]
+
+        st.dataframe(
+            filtered,
+            hide_index=True,
+            use_container_width=True,
+            height=min(
+                520,
+                70 + max(len(filtered), 1) * 35,
+            ),
+        )
+
+    # --------------------------------------------------------
+    # CAMBIAR ESTADO / EDITAR
+    # --------------------------------------------------------
+    followup_map: dict[str, dict[str, Any]] = {}
+
+    for row in followups:
+        label = (
+            f"#{row.get('id')} · "
+            f"{_safe_text(row.get('client_name'))} · "
+            f"{_safe_text(row.get('subject') or row.get('followup_type'))}"
+        )
+        followup_map[label] = row
+
+    with st.expander(
+        "Editar seguimiento",
+        expanded=False,
+    ):
+        selected_label = st.selectbox(
+            "Seleccionar seguimiento",
+            list(followup_map.keys()),
+            key="crm_edit_followup_select",
+        )
+
+        selected = followup_map[
+            selected_label
+        ]
+
+        selected_type = _safe_text(
+            selected.get("followup_type"),
+            "Nota",
+        )
+
+        type_index = (
+            CRM_FOLLOWUP_TYPES.index(selected_type)
+            if selected_type in CRM_FOLLOWUP_TYPES
+            else len(CRM_FOLLOWUP_TYPES) - 1
+        )
+
+        next_date = pd.to_datetime(
+            selected.get("next_followup_date"),
+            errors="coerce",
+        )
+
+        with st.form(
+            f"crm_edit_followup_{selected.get('id')}"
+        ):
+            e1, e2, e3 = st.columns(
+                [1, 1.2, 1],
+                gap="small",
+            )
+
+            with e1:
+                edit_type = st.selectbox(
+                    "Tipo",
+                    CRM_FOLLOWUP_TYPES,
+                    index=type_index,
+                )
+
+            with e2:
+                edit_subject = st.text_input(
+                    "Asunto",
+                    value=_safe_text(
+                        selected.get("subject"),
+                        "",
+                    ),
+                )
+
+            with e3:
+                edit_seller = st.text_input(
+                    "Responsable",
+                    value=_safe_text(
+                        selected.get("seller"),
+                        "",
+                    ),
+                )
+
+            edit_notes = st.text_area(
+                "Detalle",
+                value=_safe_text(
+                    selected.get("notes"),
+                    "",
+                ),
+                height=110,
+            )
+
+            e4, e5 = st.columns(
+                2,
+                gap="small",
+            )
+
+            with e4:
+                edit_next_date = st.date_input(
+                    "Próximo seguimiento",
+                    value=(
+                        next_date.date()
+                        if not pd.isna(next_date)
+                        else datetime.now().date()
+                    ),
+                )
+
+            with e5:
+                edit_completed = st.checkbox(
+                    "Marcar como completado",
+                    value=bool(
+                        selected.get("completed")
+                    ),
+                )
+
+            update_submitted = st.form_submit_button(
+                "Guardar cambios",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if update_submitted:
+                try:
+                    update_followup(
+                        int(selected["id"]),
+                        followup_type=edit_type,
+                        subject=edit_subject,
+                        seller=edit_seller,
+                        notes=edit_notes,
+                        next_followup_date=edit_next_date,
+                        completed=edit_completed,
+                    )
+
+                    st.success(
+                        "Seguimiento actualizado correctamente."
+                    )
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(
+                        f"No fue posible actualizar el seguimiento: {exc}"
+                    )
+
+
+# ============================================================
+# PIPELINE
+# ============================================================
+
+def _render_pipeline() -> None:
+    st.markdown(
+        """
+<div class="crm-section-kicker">TUBERÍA</div>
+<div class="crm-title-line"><div class="crm-section-title">Tubería comercial</div><span class="crm-help">?<span class="crm-help-tip">Vista comercial de las oportunidades abiertas, organizadas por etapa. Permite revisar montos, probabilidades y avanzar cada negocio hasta su cierre.</span></span></div>
+<div class="crm-section-sub">Gestiona tu pipeline moviendo oportunidades entre etapas.</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        all_rows = list_opportunities(
+            seller=(
+                _get_active_seller()
+                if _get_active_seller() != "Todos"
+                else None
+            ),
+            limit=1500,
+        )
+        all_rows = _filter_excluded_db_rows(all_rows)
+        summary = get_crm_summary()
+        pending_followups = list_followups(
+            seller=(
+                _get_active_seller()
+                if _get_active_seller() != "Todos"
+                else None
+            ),
+            pending_only=True,
+            limit=10,
+        )
+        pending_followups = _filter_excluded_db_rows(
+            pending_followups
+        )
+    except Exception as exc:
+        st.error(
+            f"No fue posible cargar la tubería comercial: {exc}"
+        )
+        return
+
+    requested_filter = st.session_state.pop("crm_requested_filter", None)
+    if requested_filter == "open":
+        st.session_state["crm_pipe_status"] = "Abierta"
+
+    # --------------------------------------------------------
+    # BARRA SUPERIOR
+    # --------------------------------------------------------
+    top_left, top_right = st.columns(
+        [4.5, 1.2],
+        gap="small",
+    )
+
+    seller_options = sorted(
+        {
+            _safe_text(row.get("seller"), "")
+            for row in all_rows
+            if _safe_text(row.get("seller"), "")
+        }
+    )
+
+    with top_left:
+        f1, f2, f3, f4 = st.columns(
+            [1, 1, 1, 1.3],
+            gap="small",
+        )
+
+        with f1:
+            seller_filter = st.selectbox(
+                "Vendedor",
+                ["Todos"] + seller_options,
+                format_func=(
+                    lambda value:
+                    "Todos los vendedores"
+                    if value == "Todos"
+                    else _seller_label(value)
+                ),
+                key="crm_pipe_seller",
+            )
+
+        with f2:
+            stage_filter = st.selectbox(
+                "Etapa",
+                ["Todas"] + list(CRM_STAGES),
+                key="crm_pipe_stage",
+            )
+
+        with f3:
+            status_filter = st.selectbox(
+                "Estado",
+                ["Todas"] + list(CRM_STATUSES),
+                key="crm_pipe_status",
+            )
+
+        with f4:
+            search_filter = st.text_input(
+                "Buscar",
+                placeholder="Cliente u oportunidad...",
+                key="crm_pipe_search",
+            )
+
+    with top_right:
+        st.markdown("<div style='height:19px'></div>", unsafe_allow_html=True)
+        st.button(
+            "+ Nueva oportunidad",
+            key="crm_pipe_new_opp",
+            type="primary",
+            use_container_width=True,
+            on_click=_go_to_crm_section,
+            args=("Oportunidades",),
+        )
+
+    if requested_filter == "open":
+        st.info(
+            "Filtro aplicado desde Centro de alertas: "
+            "solo oportunidades abiertas."
+        )
+
+    # --------------------------------------------------------
+    # FILTRAR
+    # --------------------------------------------------------
+    filtered_rows = list(all_rows)
+
+    if seller_filter != "Todos":
+        filtered_rows = [
+            row for row in filtered_rows
+            if _safe_text(row.get("seller"), "") == seller_filter
+        ]
+
+    if stage_filter != "Todas":
+        filtered_rows = [
+            row for row in filtered_rows
+            if _safe_text(row.get("stage"), "") == stage_filter
+        ]
+
+    if status_filter != "Todas":
+        filtered_rows = [
+            row for row in filtered_rows
+            if _safe_text(row.get("status"), "") == status_filter
+        ]
+
+    if search_filter:
+        query = search_filter.strip().lower()
+        filtered_rows = [
+            row
+            for row in filtered_rows
+            if (
+                query in _safe_text(row.get("client_name"), "").lower()
+                or query in _safe_text(row.get("title"), "").lower()
+                or query in _safe_text(row.get("client_rut"), "").lower()
+            )
+        ]
+
+    open_rows = [
+        row
+        for row in filtered_rows
+        if _safe_text(row.get("status"), "") == "Abierta"
+    ]
+
+    open_amount = sum(
+        float(row.get("estimated_amount") or 0)
+        for row in open_rows
+    )
+
+    weighted_amount = sum(
+        float(row.get("estimated_amount") or 0)
+        * float(row.get("probability") or 0)
+        / 100
+        for row in open_rows
+    )
+
+    won_rows = [
+        row
+        for row in filtered_rows
+        if _safe_text(row.get("status"), "") == "Ganada"
+    ]
+
+    # --------------------------------------------------------
+    # KPIs
+    # --------------------------------------------------------
+    kpi_html = (
+        '<div class="crm-kpis">'
+        '<div class="crm-kpi">'
+        '<div class="crm-kpi-label">Monto total <span class="crm-help">?<span class="crm-help-tip">Suma del valor estimado de todas las oportunidades abiertas según los filtros actuales.</span></span></div>'
+        f'<div class="crm-kpi-value">{_money(open_amount)}</div>'
+        '<div class="crm-kpi-help">Valor de oportunidades abiertas</div>'
+        '</div>'
+        '<div class="crm-kpi">'
+        '<div class="crm-kpi-label">Monto ponderado <span class="crm-help">?<span class="crm-help-tip">Valor esperado del embudo: monto de cada oportunidad multiplicado por su probabilidad de cierre.</span></span></div>'
+        f'<div class="crm-kpi-value">{_money(weighted_amount)}</div>'
+        '<div class="crm-kpi-help">Monto ajustado por probabilidad</div>'
+        '</div>'
+        '<div class="crm-kpi">'
+        '<div class="crm-kpi-label">Oportunidades abiertas <span class="crm-help">?<span class="crm-help-tip">Cantidad de negocios comerciales que todavía se encuentran activos y no han sido ganados ni perdidos.</span></span></div>'
+        f'<div class="crm-kpi-value">{len(open_rows)}</div>'
+        '<div class="crm-kpi-help accent">Negocios activos</div>'
+        '</div>'
+        '<div class="crm-kpi">'
+        '<div class="crm-kpi-label">Ganadas <span class="crm-help">?<span class="crm-help-tip">Cantidad de oportunidades cerradas exitosamente.</span></span></div>'
+        f'<div class="crm-kpi-value">{len(won_rows)}</div>'
+        '<div class="crm-kpi-help">Cierres exitosos</div>'
+        '</div>'
+        '</div>'
+    )
+
+    st.markdown(
+        kpi_html,
+        unsafe_allow_html=True,
+    )
+
+    # --------------------------------------------------------
+    # VISTA
+    # --------------------------------------------------------
+    view_mode = st.radio(
+        "Vista",
+        options=["Kanban", "Tabla", "Resumen"],
+        horizontal=True,
+        key="crm_pipeline_view",
+    )
+
+    if not view_mode:
+        view_mode = "Kanban"
+
+    st.markdown("")
+
+    # --------------------------------------------------------
+    # KANBAN
+    # --------------------------------------------------------
+    if view_mode == "Kanban":
+        if not open_rows:
+            st.info(
+                "No existen oportunidades abiertas para los filtros seleccionados."
+            )
+        else:
+            stage_columns = st.columns(
+                len(CRM_STAGES),
+                gap="small",
+            )
+
+            for stage_index, (column, stage) in enumerate(
+                zip(stage_columns, CRM_STAGES)
+            ):
+                stage_rows = [
+                    row
+                    for row in open_rows
+                    if _safe_text(
+                        row.get("stage"),
+                        "",
+                    ) == stage
+                ]
+
+                stage_total = sum(
+                    float(
+                        row.get("estimated_amount")
+                        or 0
+                    )
+                    for row in stage_rows
+                )
+
+                with column:
+                    st.markdown(
+                        (
+                            '<div class="crm-stage-head">'
+                            f'<div class="crm-stage-name">{stage}</div>'
+                            '<div class="crm-stage-countline">'
+                            f'<div class="crm-stage-count">{len(stage_rows)}</div>'
+                            f'<div class="crm-stage-total">{_money(stage_total)}</div>'
+                            '</div>'
+                            '</div>'
+                        ),
+                        unsafe_allow_html=True,
+                    )
+
+                    if not stage_rows:
+                        st.markdown(
+                            '<div class="crm-stage-empty">Sin oportunidades</div>',
+                            unsafe_allow_html=True,
+                        )
+                        continue
+
+                    for item in stage_rows:
+                        opportunity_id = int(
+                            item.get("id")
+                        )
+
+                        amount = float(
+                            item.get("estimated_amount")
+                            or 0
+                        )
+                        probability = int(
+                            item.get("probability")
+                            or 0
+                        )
+
+                        next_date = pd.to_datetime(
+                            item.get("next_action_date"),
+                            errors="coerce",
+                        )
+                        next_date_label = (
+                            next_date.strftime("%d-%m-%Y")
+                            if not pd.isna(next_date)
+                            else "-"
+                        )
+
+                        close_date = pd.to_datetime(
+                            item.get("expected_close_date"),
+                            errors="coerce",
+                        )
+                        close_date_label = (
+                            close_date.strftime("%d-%m-%Y")
+                            if not pd.isna(close_date)
+                            else "-"
+                        )
+
+                        client_name = _safe_text(
+                            item.get("client_name")
+                        )
+                        title = _safe_text(
+                            item.get("title")
+                        )
+                        seller = _safe_text(
+                            item.get("seller")
+                        )
+                        next_action = _safe_text(
+                            item.get("next_action"),
+                            "Sin próxima acción",
+                        )
+
+                        st.markdown(
+                            (
+                                '<div class="crm-kanban-card">'
+                                f'<div class="crm-kanban-id">#{opportunity_id} · {seller}</div>'
+                                f'<div class="crm-kanban-client">{client_name}</div>'
+                                f'<div class="crm-kanban-title">{title}</div>'
+                                f'<div class="crm-kanban-money">{_money(amount)}</div>'
+                                f'<div class="crm-kanban-chip">{probability}%</div>'
+                                '<div class="crm-kanban-meta">'
+                                f'<span>Vendedor {seller}</span>'
+                                f'<span>{close_date_label}</span>'
+                                '</div>'
+                                '<div class="crm-kanban-label">Próxima acción</div>'
+                                f'<div class="crm-kanban-action">{next_action}</div>'
+                                f'<div class="crm-kanban-meta"><span>{next_date_label}</span></div>'
+                                '</div>'
+                            ),
+                            unsafe_allow_html=True,
+                        )
+
+                        # Acciones rápidas
+                        a1, a2, a3, a4 = st.columns(
+                            4,
+                            gap="small",
+                        )
+
+                        with a1:
+                            if stage_index > 0:
+                                previous_stage = CRM_STAGES[
+                                    stage_index - 1
+                                ]
+
+                                st.button(
+                                    "←",
+                                    key=f"crm_prev_{opportunity_id}",
+                                    help=f"Mover a {previous_stage}",
+                                    use_container_width=True,
+                                    on_click=_update_pipeline_opportunity,
+                                    args=(opportunity_id,),
+                                    kwargs={
+                                        "stage": previous_stage,
+                                        "probability": CRM_STAGE_PROBABILITY.get(
+                                            previous_stage,
+                                            probability,
+                                        ),
+                                    },
+                                )
+                            else:
+                                st.caption("")
+
+                        with a2:
+                            if stage_index < len(CRM_STAGES) - 1:
+                                next_stage = CRM_STAGES[
+                                    stage_index + 1
+                                ]
+
+                                st.button(
+                                    "→",
+                                    key=f"crm_next_{opportunity_id}",
+                                    help=f"Mover a {next_stage}",
+                                    use_container_width=True,
+                                    on_click=_update_pipeline_opportunity,
+                                    args=(opportunity_id,),
+                                    kwargs={
+                                        "stage": next_stage,
+                                        "probability": CRM_STAGE_PROBABILITY.get(
+                                            next_stage,
+                                            probability,
+                                        ),
+                                    },
+                                )
+                            else:
+                                st.caption("")
+
+                        with a3:
+                            st.button(
+                                "✓",
+                                key=f"crm_win_{opportunity_id}",
+                                help="Marcar como ganada",
+                                use_container_width=True,
+                                on_click=_update_pipeline_opportunity,
+                                args=(opportunity_id,),
+                                kwargs={
+                                    "status": "Ganada",
+                                    "probability": 100,
+                                },
+                            )
+
+                        with a4:
+                            st.button(
+                                "✕",
+                                key=f"crm_lost_{opportunity_id}",
+                                help="Marcar como perdida",
+                                use_container_width=True,
+                                on_click=_update_pipeline_opportunity,
+                                args=(opportunity_id,),
+                                kwargs={
+                                    "status": "Perdida",
+                                    "probability": 0,
+                                },
+                            )
+
+                        st.markdown("")
+
+    # --------------------------------------------------------
+    # TABLA
+    # --------------------------------------------------------
+    elif view_mode == "Tabla":
+        display = _opportunity_display_frame(
+            filtered_rows
+        )
+
+        if display.empty:
+            st.info(
+                "No existen oportunidades para los filtros seleccionados."
+            )
+        else:
+            st.dataframe(
+                display,
+                hide_index=True,
+                use_container_width=True,
+                height=min(
+                    620,
+                    80 + max(len(display), 1) * 35,
+                ),
+                column_config={
+                    "Monto": st.column_config.NumberColumn(
+                        "Monto",
+                        format="$ %.0f",
+                    ),
+                    "Probabilidad": st.column_config.NumberColumn(
+                        "Probabilidad",
+                        format="%d %%",
+                    ),
+                },
+            )
+
+    # --------------------------------------------------------
+    # RESUMEN
+    # --------------------------------------------------------
+    else:
+        stage_summary = []
+
+        for stage in CRM_STAGES:
+            rows_stage = [
+                row
+                for row in open_rows
+                if _safe_text(row.get("stage"), "") == stage
+            ]
+
+            total_stage = sum(
+                float(row.get("estimated_amount") or 0)
+                for row in rows_stage
+            )
+
+            weighted_stage = sum(
+                float(row.get("estimated_amount") or 0)
+                * float(row.get("probability") or 0)
+                / 100
+                for row in rows_stage
+            )
+
+            stage_summary.append(
+                {
+                    "Etapa": stage,
+                    "Oportunidades": len(rows_stage),
+                    "Monto": total_stage,
+                    "Ponderado": weighted_stage,
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(stage_summary),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Monto": st.column_config.NumberColumn(
+                    "Monto",
+                    format="$ %.0f",
+                ),
+                "Ponderado": st.column_config.NumberColumn(
+                    "Ponderado",
+                    format="$ %.0f",
+                ),
+            },
+        )
+
+    # --------------------------------------------------------
+    # TODAS LAS OPORTUNIDADES
+    # --------------------------------------------------------
+    st.markdown("")
+
+    with st.expander(
+        "Todas las oportunidades · ⓘ",
+        expanded=True,
+    ):
+        display_all = _opportunity_display_frame(
+            filtered_rows
+        )
+
+        if display_all.empty:
+            st.caption(
+                "Sin oportunidades para mostrar."
+            )
+        else:
+            st.dataframe(
+                display_all[
+                    [
+                        "ID",
+                        "Cliente",
+                        "Etapa",
+                        "Monto",
+                        "Probabilidad",
+                        "Vendedor",
+                        "Próxima acción",
+                        "Cierre estimado",
+                        "Estado",
+                    ]
+                ],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Monto": st.column_config.NumberColumn(
+                        "Monto",
+                        format="$ %.0f",
+                    ),
+                    "Probabilidad": st.column_config.NumberColumn(
+                        "Probabilidad",
+                        format="%d %%",
+                    ),
+                },
+            )
+
+    # --------------------------------------------------------
+    # PRÓXIMAS ACCIONES
+    # --------------------------------------------------------
+    with st.expander(
+        "Próximas acciones · ⓘ",
+        expanded=True,
+    ):
+        if not pending_followups:
+            st.caption(
+                "No existen seguimientos pendientes."
+            )
+        else:
+            follow_rows = []
+
+            for item in pending_followups:
+                next_date = pd.to_datetime(
+                    item.get("next_followup_date"),
+                    errors="coerce",
+                )
+
+                follow_rows.append(
+                    {
+                        "Acción": _safe_text(
+                            item.get("subject")
+                            or item.get("followup_type")
+                        ),
+                        "Cliente": _safe_text(
+                            item.get("client_name")
+                        ),
+                        "Vendedor": _safe_text(
+                            item.get("seller")
+                        ),
+                        "Fecha": (
+                            next_date.strftime("%d-%m-%Y")
+                            if not pd.isna(next_date)
+                            else "-"
+                        ),
+                        "Estado": (
+                            "Completado"
+                            if bool(item.get("completed"))
+                            else "Pendiente"
+                        ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(follow_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
+# ============================================================
+# INFORMACIÓN FUENTE
+# ============================================================
+
+def _render_source_info(
+    sales_df: pd.DataFrame,
+    detected_columns: dict,
+) -> None:
+    with st.expander(
+        "Información de la fuente",
+        expanded=False,
+    ):
+        st.markdown(
+            "**Fuente actual:** ERP Ventas"
+        )
+
+        st.write(
+            f"Registros disponibles: "
+            f"{len(sales_df):,}".replace(",", ".")
+        )
+
+        st.markdown(
+            "**Columnas detectadas para CRM:**"
+        )
+
+        source_rows = []
+
+        for key, value in detected_columns.items():
+            source_rows.append(
+                {
+                    "Dato CRM": key,
+                    "Columna ERP": (
+                        value
+                        if value
+                        else "No detectada"
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(
+                source_rows
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
+
+# ============================================================
+# RENDER PRINCIPAL
+# ============================================================
+
+# Nota: evitar traducción automática del navegador en esta app; puede alterar el DOM React.
+
+def render(
+    ctx: dict | None = None,
+) -> None:
+    _apply_styles()
+
+    ctx = ctx or {}
+
+    sales_df = ctx.get(
+        "sales_df"
+    )
+
+    if sales_df is None:
+        sales_df = pd.DataFrame()
+
+    header_html = (
+        '<div class="crm-page-head">'
+        '<div>'
+        '<h1>CRM</h1>'
+        '<p>Resumen ejecutivo, clientes, oportunidades, seguimiento y tubería comercial.</p>'
+        '</div>'
+        '<div class="crm-live-pill">'
+        '<i></i>ERP + PostgreSQL conectados'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
+
+    if sales_df.empty:
+        st.warning(
+            "No existen datos de ERP Ventas disponibles "
+            "para construir el CRM."
+        )
+        return
+
+    # ========================================================
+    # BASE COMERCIAL OFICIAL COMPARTIDA
+    # ========================================================
+    # Inicio, Resumen Ejecutivo y CRM parten ahora de la misma
+    # función. Esto elimina diferencias de ventas, documentos y
+    # clientes entre módulos.
+    commercial_base = prepare_commercial_base(
+        sales_df
+    )
+
+    if commercial_base.empty:
+        st.warning(
+            "No existen movimientos comerciales reconocidos "
+            "para construir el CRM."
+        )
+        return
+
+    detected_columns = _detect_sales_columns(
+        commercial_base
+    )
+
+    seller_col = detected_columns.get(
+        "seller"
+    )
+
+    seller_options = sorted(
+        commercial_base[
+            "_VendedorCodigo"
+        ]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist(),
+        key=lambda code: (
+            shared_seller_name(code).upper(),
+            code,
+        ),
+    )
+
+    active_seller = st.selectbox(
+        "Módulo vendedor",
+        options=["Todos"] + seller_options,
+        index=(
+            ["Todos"] + seller_options
+        ).index(
+            st.session_state.get(
+                "crm_active_seller",
+                "Todos",
+            )
+            if st.session_state.get(
+                "crm_active_seller",
+                "Todos",
+            ) in ["Todos"] + seller_options
+            else "Todos"
+        ),
+        format_func=(
+            lambda value:
+            "Todos los vendedores"
+            if value == "Todos"
+            else shared_seller_name(value)
+        ),
+        key="crm_active_seller",
+        help=(
+            "Selecciona un vendedor para ver su cartera, oportunidades, "
+            "seguimientos y tubería como un módulo comercial independiente."
+        ),
+    )
+
+    # Rango real del archivo ERP.
+    period_start = commercial_base[
+        "Fecha_dt"
+    ].min().date()
+    period_end = commercial_base[
+        "Fecha_dt"
+    ].max().date()
+
+    # Misma función compartida que usa Resumen Ejecutivo.
+    sales_for_module = filter_commercial_view(
+        commercial_base,
+        period_start,
+        period_end,
+        seller_code=(
+            active_seller
+            if active_seller != "Todos"
+            else None
+        ),
+    )
+
+    clients, detected_columns = (
+        _prepare_clients(
+            sales_for_module
+        )
+    )
+    st.session_state["crm_sales_period_start"] = period_start
+    st.session_state["crm_sales_period_end"] = period_end
+
+    if "Vendedor" in clients.columns:
+        clients = clients[
+            ~clients["Vendedor"].map(
+                _is_excluded_seller
+            )
+        ].copy()
+
+    if clients.empty:
+        st.error(
+            "No fue posible identificar clientes en ERP Ventas. "
+            "Revisa las columnas de nombre/RUT del archivo de ventas."
+        )
+
+        _render_source_info(
+            sales_for_module,
+            detected_columns,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Navegación CRM
+    # --------------------------------------------------------
+
+    # Las navegaciones solicitadas por botones internos se aplican AQUÍ,
+    # antes de instanciar el widget con key="crm_section".
+    requested_section = st.session_state.pop("crm_requested_section", None)
+    if requested_section in CRM_TABS:
+        st.session_state["crm_section"] = requested_section
+
+    if st.session_state.get("crm_section") not in CRM_TABS:
+        st.session_state["crm_section"] = "Resumen Ejecutivo"
+
+    section = st.radio(
+        "Sección CRM",
+        options=list(CRM_TABS),
+        horizontal=True,
+        key="crm_section",
+    )
+
+    st.markdown("")
+
+    # --------------------------------------------------------
+    # Contenido
+    # --------------------------------------------------------
+
+    if section == "Resumen Ejecutivo":
+        _render_summary(
+            clients,
+            sales_for_module,
+        )
+
+    elif section == "Clientes":
+        _render_clients(
+            clients
+        )
+
+    elif section == "Ficha 360°":
+        render_client_360(
+            ctx
+        )
+
+    elif section == "Oportunidades":
+        _render_opportunities(
+            clients
+        )
+
+    elif section == "Seguimientos":
+        _render_followups(
+            clients
+        )
+
+    elif section == "Tubería":
+        _render_pipeline()
+
+    # --------------------------------------------------------
+    # Información técnica
+    # --------------------------------------------------------
+
+    st.markdown("")
+
+    _render_source_info(
+        sales_for_module,
+        detected_columns,
+    )
